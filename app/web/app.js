@@ -17,7 +17,7 @@ function openReader(book, start = 0, end = 0) {
     start: String(Math.max(0, toSafeInt(start, 0))),
     end: String(Math.max(0, toSafeInt(end, 0))),
   });
-  window.open(`/reader?${params.toString()}`, '_blank');
+  window.open(`/web/reader.html?${params.toString()}`, '_blank');
 }
 
 function pickFocusStart(item) {

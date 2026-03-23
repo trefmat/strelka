@@ -18,6 +18,7 @@ WEB_BASE_URL = os.getenv("WEB_BASE_URL", BASE_URL).rstrip("/")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 API_TIMEOUT = 30
 TG_MESSAGE_LIMIT = 3800
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 logger = logging.getLogger(__name__)
 _CHAT_BOOK_FILTERS: dict[int, set[str]] = {}
@@ -40,7 +41,7 @@ def _reader_url(book: str, start: int, end: int) -> str:
             "end": max(0, int(end)),
         }
     )
-    return f"{WEB_BASE_URL}/reader?{params}"
+    return f"{WEB_BASE_URL}/web/reader.html?{params}"
 
 
 def _focus_start(item: dict[str, Any]) -> int:
@@ -383,6 +384,10 @@ async def upload_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     filename = (document.file_name or "book.txt").strip()
     if not filename.lower().endswith((".txt", ".fb2", ".epub")):
         await _reply(update, "Поддерживаются файлы .txt, .fb2 и .epub.")
+        return
+    if int(document.file_size or 0) > MAX_UPLOAD_BYTES:
+        max_mb = round(MAX_UPLOAD_BYTES / (1024 * 1024), 1)
+        await _reply(update, f"Файл слишком большой. Максимум: {max_mb} MB.")
         return
 
     try:

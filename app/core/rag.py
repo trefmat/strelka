@@ -103,6 +103,11 @@ class SentenceCandidate:
     token_set: set[str]
     hit_rank: int
     sentence_order: int
+    exact_overlap: float = 0.0
+    anchor_coverage: float = 0.0
+    semantic_score: float = 0.0
+    support_score: float = 0.0
+    has_causal_cue: bool = False
 
 
 class RagService:
@@ -323,6 +328,32 @@ class RagService:
                 return hints
         return hints
 
+    @staticmethod
+    def _low_confidence_result(hits: list[RetrievalHit]) -> AnswerResult:
+        return AnswerResult(
+            answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
+            hits=hits,
+            message="low_confidence",
+        )
+
+    def _confidence_score(self, ranked: list[SentenceCandidate]) -> float:
+        if not ranked:
+            return 0.0
+        top = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+        margin = top.score if second is None else max(0.0, top.score - second.score)
+        confidence = (
+            0.52 * max(0.0, top.score)
+            + 0.24 * top.support_score
+            + 0.16 * top.semantic_score
+            + 0.08 * margin
+        )
+        if second is not None:
+            overlap = self._jaccard(top.token_set, second.token_set)
+            if overlap >= 0.45:
+                confidence += 0.03
+        return confidence
+
     def answer_from_hits(self, question: str, hits: list[RetrievalHit]) -> AnswerResult:
         if not hits:
             return AnswerResult(
@@ -335,7 +366,7 @@ class RagService:
         query_core = self.preprocessor.core_query_terms(question)
         query_meaningful = self.preprocessor.meaningful_query_terms(question)
         query_anchor = self._effective_anchor_terms(query_meaningful, query_core)
-        query_exact = set()
+        query_exact: set[str] = set()
         for token in raw_query_exact:
             stem = self.preprocessor._stem(self.preprocessor._normalize_token(token))
             if not query_anchor or stem in query_anchor:
@@ -348,11 +379,7 @@ class RagService:
         is_weak_anchor_query = bool(query_anchor) and all(self._is_weak_anchor_term(term) for term in query_anchor)
         refusal_terms = {term for term in query_anchor if self._is_refusal_term(term)}
         action_inf_stems, action_inf_words = self._query_action_infinitives(raw_query_exact)
-        focus_anchor_term = ""
-        if query_anchor:
-            long_anchor_terms = [term for term in query_anchor if len(term) >= 6]
-            if long_anchor_terms:
-                focus_anchor_term = max(long_anchor_terms, key=len)
+
         anchor_query_text = " ".join(sorted(query_anchor))
         query_anchor_expanded = set(self.preprocessor.tokenize(anchor_query_text)) if anchor_query_text else set()
         query_anchor_expanded_non_morph = {t for t in query_anchor_expanded if not self.preprocessor.is_morph_token(t)}
@@ -363,56 +390,58 @@ class RagService:
             morph = self.preprocessor._morph_token(term)
             if morph:
                 query_anchor_short_morph.add(morph)
+
         sentence_map: dict[str, SentenceCandidate] = {}
         opposite_hint_text = ""
         opposite_hint_score = float("-inf")
 
         for hit_rank, hit in enumerate(hits):
-            hit_token_set = self._sentence_token_set(hit.chunk.text)
-            hit_has_anchor = bool(query_anchor and (hit_token_set & query_anchor))
             sentences = self.preprocessor.split_sentences(hit.chunk.text)
+            scored_sentences = self.retriever.sentence_scores(question, sentences)
             sentence_order_map = {
                 self._normalize_answer_sentence(sentence): idx
                 for idx, sentence in enumerate(sentences)
             }
-            scored = self.retriever.sentence_scores(question, sentences)
-            for sentence, score in scored:
+            hit_token_set = self._sentence_token_set(hit.chunk.text)
+            hit_has_anchor = bool(query_anchor and (hit_token_set & query_anchor))
+
+            for sentence, semantic_score in scored_sentences:
                 normalized = self._normalize_answer_sentence(sentence)
                 if not normalized:
                     continue
 
-                token_set = self._sentence_token_set(sentence)
+                token_set = self._sentence_token_set(normalized)
+                if not token_set:
+                    continue
+
+                anchor_overlap = len(token_set & query_anchor) if query_anchor else 0
+                expanded_anchor_overlap = (
+                    len(token_set & query_anchor_expanded_non_morph) if query_anchor_expanded_non_morph else 0
+                )
+                short_morph_overlap = len(token_set & query_anchor_short_morph) if query_anchor_short_morph else 0
+                has_direct_anchor = anchor_overlap > 0 or expanded_anchor_overlap > 0 or short_morph_overlap > 0
                 has_causal_cue = is_why_question and self._has_causal_cue(normalized)
-                if query_anchor:
-                    anchor_overlap = len(token_set & query_anchor)
-                    expanded_anchor_overlap = (
-                        len(token_set & query_anchor_expanded_non_morph) if query_anchor_expanded_non_morph else 0
-                    )
-                    short_morph_overlap = len(token_set & query_anchor_short_morph) if query_anchor_short_morph else 0
-                    if anchor_overlap == 0 and expanded_anchor_overlap == 0 and short_morph_overlap == 0:
-                        if is_weak_anchor_query and hit_has_anchor and not self._is_fragmentary_sentence(normalized):
-                                                                                  
-                                                                                 
-                                                              
-                            pass
-                                                                                              
-                                                                           
-                        elif not has_causal_cue:
-                            continue
 
-                exact_overlap = 0.0
-                if query_exact:
-                    sentence_exact = set(self.preprocessor.tokenize_exact(sentence))
-                    exact_overlap = len(sentence_exact & query_exact) / len(query_exact)
+                if query_anchor and not has_direct_anchor:
+                    weak_anchor_context_ok = is_weak_anchor_query and hit_has_anchor and not self._is_fragmentary_sentence(normalized)
+                    if not weak_anchor_context_ok and not has_causal_cue:
+                        continue
 
-                length_bonus = 0.04 if 5 <= len(token_set) <= 35 else 0.0
-                anchor_bonus = 0.0
-                if query_anchor:
-                    anchor_bonus = 0.05 * (len(token_set & query_anchor) / len(query_anchor))
-                speech_bonus = 0.0
-                if query_speech:
-                    speech_bonus = 0.05 * (len(token_set & query_speech) / len(query_speech))
-                fragment_penalty = 0.10 if self._is_fragmentary_sentence(normalized) else 0.0
+                sentence_exact = set(self.preprocessor.tokenize_exact(normalized))
+                exact_overlap = (len(sentence_exact & query_exact) / len(query_exact)) if query_exact else 0.0
+                anchor_coverage = (anchor_overlap / len(query_anchor)) if query_anchor else 0.0
+                expanded_coverage = (
+                    (expanded_anchor_overlap / len(query_anchor_expanded_non_morph))
+                    if query_anchor_expanded_non_morph
+                    else 0.0
+                )
+                support_score = max(exact_overlap, anchor_coverage, expanded_coverage)
+
+                if support_score == 0.0 and semantic_score < 0.34 and hit.score < 0.42:
+                    continue
+
+                speech_coverage = (len(token_set & query_speech) / len(query_speech)) if query_speech else 0.0
+                fragment_penalty = 0.11 if self._is_fragmentary_sentence(normalized) else 0.0
                 person_bonus = 0.0
                 if expects_person and self._has_name_like_token(normalized):
                     person_bonus += 0.08
@@ -422,37 +451,30 @@ class RagService:
                 if is_why_question and has_causal_cue:
                     causal_bonus += 0.18
                 elif is_why_question and len(query_anchor) >= 2:
-                    causal_bonus -= 0.06
-                if is_why_question and focus_anchor_term:
-                    if focus_anchor_term in token_set:
-                        causal_bonus += 0.09
-                    else:
-                        causal_bonus -= 0.04
+                    causal_bonus -= 0.05
+
                 echo_penalty = 0.0
                 if is_why_question and query_anchor and not has_causal_cue:
-                    anchor_cov = len(token_set & query_anchor) / max(1, len(query_anchor))
-                    if anchor_cov >= 0.8 and len(token_set) <= len(query_anchor) + 4:
-                                                                                  
-                                                       
-                        echo_penalty = 0.14
+                    if anchor_coverage >= 0.8 and len(token_set) <= len(query_anchor) + 4:
+                        echo_penalty = 0.13
 
                 combined_score = (
-                    0.59 * score
-                    + 0.30 * hit.score
-                    + 0.06 * exact_overlap
-                    + length_bonus
-                    + anchor_bonus
-                    + speech_bonus
+                    0.52 * semantic_score
+                    + 0.28 * hit.score
+                    + 0.14 * support_score
+                    + 0.06 * speech_coverage
                     + person_bonus
                     + causal_bonus
                     - fragment_penalty
                     - echo_penalty
                 )
+
                 if is_why_question and action_inf_stems and (token_set & action_inf_stems):
                     text_norm = normalized.lower().replace("ё", "е")
                     if _OPPOSITE_MOTION_HINT_RE.search(text_norm) and combined_score > opposite_hint_score:
                         opposite_hint_score = combined_score
                         opposite_hint_text = normalized
+
                 existing = sentence_map.get(normalized)
                 if existing is None or combined_score > existing.score:
                     sentence_map[normalized] = SentenceCandidate(
@@ -461,14 +483,15 @@ class RagService:
                         token_set=token_set,
                         hit_rank=hit_rank,
                         sentence_order=sentence_order_map.get(normalized, 0),
+                        exact_overlap=exact_overlap,
+                        anchor_coverage=anchor_coverage,
+                        semantic_score=semantic_score,
+                        support_score=support_score,
+                        has_causal_cue=has_causal_cue,
                     )
 
         if not sentence_map:
-            return AnswerResult(
-                answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
-                hits=hits,
-                message="low_confidence",
-            )
+            return self._low_confidence_result(hits)
 
         ranked = sorted(sentence_map.values(), key=lambda item: item.score, reverse=True)
         non_fragment_ranked = [item for item in ranked if not self._is_fragmentary_sentence(item.text)]
@@ -476,21 +499,9 @@ class RagService:
             ranked = non_fragment_ranked
 
         if is_why_question and ranked:
-            causal_ranked = [item for item in ranked if self._has_causal_cue(item.text)]
-            if causal_ranked:
-                top = ranked[0]
-                top_anchor_cov = 0.0
-                if query_anchor:
-                    top_anchor_cov = len(top.token_set & query_anchor) / max(1, len(query_anchor))
-                                                                                  
-                                                                   
-                if (not self._has_causal_cue(top.text)) and top_anchor_cov >= 0.75:
-                    ranked = causal_ranked + [item for item in ranked if item not in causal_ranked]
-
-        if is_why_question and focus_anchor_term:
-            focus_ranked = [item for item in ranked if focus_anchor_term in item.token_set]
-            if focus_ranked and not any(self._has_causal_cue(item.text) for item in ranked):
-                ranked = focus_ranked
+            causal_ranked = [item for item in ranked if item.has_causal_cue]
+            if causal_ranked and not ranked[0].has_causal_cue:
+                ranked = causal_ranked + [item for item in ranked if item not in causal_ranked]
 
         if is_why_question and refusal_terms and action_inf_stems:
             refusal_action_ranked = [
@@ -509,11 +520,7 @@ class RagService:
                         hits=hits,
                         message="low_confidence",
                     )
-                return AnswerResult(
-                    answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
-                    hits=hits,
-                    message="low_confidence",
-                )
+                return self._low_confidence_result(hits)
 
         if ranked and len(query_anchor) >= 2:
             min_anchor_overlap = 2 if len(query_anchor) >= 3 else 1
@@ -521,61 +528,73 @@ class RagService:
                 overlap_ranked = [
                     item
                     for item in ranked
-                    if len(item.token_set & query_anchor) >= min_anchor_overlap or self._has_causal_cue(item.text)
+                    if len(item.token_set & query_anchor) >= min_anchor_overlap or item.has_causal_cue
                 ]
             else:
                 overlap_ranked = [item for item in ranked if len(item.token_set & query_anchor) >= min_anchor_overlap]
             if overlap_ranked:
                 ranked = overlap_ranked
 
-        if ranked and ranked[0].score < 0.26:
-            return AnswerResult(
-                answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
-                hits=hits,
-                message="low_confidence",
-            )
+        if not ranked:
+            return self._low_confidence_result(hits)
 
-        dynamic_floor = max(settings.min_answer_score, ranked[0].score * 0.45)
+        if ranked[0].score < 0.24:
+            return self._low_confidence_result(hits)
+
+        confidence = self._confidence_score(ranked)
+        confidence_floor = 0.22 if is_why_question else 0.27
+        if confidence < confidence_floor:
+            return self._low_confidence_result(hits)
+
+        if is_why_question and (not ranked[0].has_causal_cue) and ranked[0].support_score < 0.55:
+            return self._low_confidence_result(hits)
+
+        dynamic_floor = max(settings.min_answer_score, ranked[0].score * (0.58 if is_why_question else 0.52))
         filtered = [candidate for candidate in ranked if candidate.score >= dynamic_floor]
+        if not filtered:
+            filtered = [ranked[0]]
 
-        selection_top_n = 3 if is_why_question else 2
-        if (not is_why_question) and is_weak_anchor_query and filtered:
-            lead = filtered[0]
-            contextual = [
-                item
-                for item in filtered
-                if item.hit_rank == lead.hit_rank and item.sentence_order >= lead.sentence_order
-            ]
-            contextual = sorted(contextual, key=lambda item: (item.sentence_order, -item.score))
-            selected = contextual[:selection_top_n]
-            if not selected:
-                selected = self._select_diverse_sentences(filtered, selection_top_n)
+        if is_why_question:
+            selected = [filtered[0]]
+            for candidate in filtered[1:]:
+                if len(selected) >= 2:
+                    break
+                if not candidate.has_causal_cue:
+                    continue
+                if self._jaccard(candidate.token_set, selected[0].token_set) >= 0.92:
+                    continue
+                selected.append(candidate)
+            selected = sorted(selected, key=lambda item: (item.has_causal_cue, item.score), reverse=True)
         else:
-            selected = self._select_diverse_sentences(filtered, selection_top_n)
-        if is_why_question and selected:
-            selected = sorted(selected, key=lambda item: (self._has_causal_cue(item.text), item.score), reverse=True)
-        elif selected:
-            selected = sorted(selected, key=lambda item: (item.hit_rank, item.sentence_order, -item.score))
-        best = [candidate.text for candidate in selected]
+            lead = filtered[0]
+            selected = [lead]
+            for candidate in filtered[1:]:
+                if len(selected) >= 2:
+                    break
+                same_context = candidate.hit_rank == lead.hit_rank and candidate.sentence_order >= lead.sentence_order
+                good_score = candidate.score >= max(lead.score * 0.74, 0.28)
+                good_support = candidate.support_score >= 0.2 or candidate.semantic_score >= 0.44
+                low_redundancy = self._jaccard(candidate.token_set, lead.token_set) < 0.90
+                if same_context and good_score and good_support and low_redundancy:
+                    selected.append(candidate)
+            if len(selected) == 1 and len(filtered) > 1:
+                diverse = self._select_diverse_sentences(filtered, 2)
+                if diverse:
+                    selected = sorted(diverse, key=lambda item: (item.hit_rank, item.sentence_order, -item.score))
 
+        best = [candidate.text for candidate in selected if candidate.text]
         if not best:
-            return AnswerResult(
-                answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
-                hits=hits,
-                message="low_confidence",
-            )
+            return self._low_confidence_result(hits)
 
         answer = self._truncate_answer(best, max_chars=680)
         if not answer:
-            return AnswerResult(
-                answer="Точных оснований для ответа не найдено. Ниже приведены самые близкие цитаты.",
-                hits=hits,
-                message="low_confidence",
-            )
+            return self._low_confidence_result(hits)
+
         if expects_person and (self._starts_with_pronoun(answer) or not self._has_name_like_token(answer)):
             hints = self._person_hints(best, hits, limit=4)
             if hints:
                 answer = f"По найденным фрагментам: {', '.join(hints)}. {answer}"
+
         return AnswerResult(answer=answer, hits=hits)
 
     def ask(self, question: str, top_k: int, *, allowed_books: set[str] | None = None) -> AnswerResult:

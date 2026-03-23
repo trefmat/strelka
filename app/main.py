@@ -4,6 +4,7 @@ from collections import Counter
 from io import BytesIO
 import html as html_lib
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -85,6 +86,15 @@ _WEAK_QUERY_PREFIXES = (
     "отмеча",
 )
 _SUPPORTED_UPLOAD_EXTENSIONS = {".txt", ".fb2", ".epub"}
+_MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+
+app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
+
+
+@app.errorhandler(413)
+def payload_too_large(_err):
+    max_mb = round(_MAX_UPLOAD_BYTES / (1024 * 1024), 1)
+    return jsonify({"detail": f"File is too large. Max allowed size is {max_mb} MB"}), 413
 
 
 def _clip(text: str, size: int = 360) -> str:
@@ -654,6 +664,22 @@ def _parse_books_filter(payload: dict) -> tuple[set[str] | None, str | None]:
     return selected, None
 
 
+def _hit_has_direct_support(query: str, hit: RetrievalHit) -> bool:
+    exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
+    if _whole_word_match_count(hit.chunk.text, exact_tokens) > 0:
+        return True
+
+    core_terms = service.preprocessor.core_query_terms(query)
+    if core_terms:
+        chunk_terms = set(service.preprocessor.tokenize(hit.chunk.text, include_synonyms=False))
+        overlap = len(core_terms & chunk_terms)
+        min_overlap = 1 if len(core_terms) <= 2 else 2
+        if overlap >= min_overlap:
+            return True
+
+    return False
+
+
 def _parse_quote_size(payload: dict, *, default: int = 420, min_size: int = 120, max_size: int = 2400) -> tuple[int, str | None]:
     raw = payload.get("quote_size", default)
     try:
@@ -992,6 +1018,9 @@ def load_preloaded_book():
         return jsonify({"detail": f"preloaded book not found: {book}"}), 404
 
     raw = path.read_bytes()
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        max_mb = round(_MAX_UPLOAD_BYTES / (1024 * 1024), 1)
+        return jsonify({"detail": f"File is too large. Max allowed size is {max_mb} MB"}), 413
     content, error = _extract_upload_text(book, raw)
     if error:
         return jsonify({"detail": error}), 400
@@ -1011,6 +1040,9 @@ def upload_book():
         return jsonify({"detail": "Only .txt, .fb2 and .epub files are supported"}), 400
 
     raw = file.read()
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        max_mb = round(_MAX_UPLOAD_BYTES / (1024 * 1024), 1)
+        return jsonify({"detail": f"File is too large. Max allowed size is {max_mb} MB"}), 413
     content, error = _extract_upload_text(file.filename, raw)
     if error:
         return jsonify({"detail": error}), 400
@@ -1182,7 +1214,8 @@ def ask():
             hits = _lexical_fallback_hits(question, top_k=retrieve_k, allowed_books=allowed_books)
         source_hits = _filter_relevant_hits(question, hits, strict=True)
         if not source_hits:
-            source_hits = _filter_relevant_hits(question, hits, strict=False)
+            loose_hits = _filter_relevant_hits(question, hits, strict=False)
+            source_hits = [h for h in loose_hits if _hit_has_direct_support(question, h)]
         source_hits = _dedupe_hits(source_hits, top_k)
         result = service.answer_from_hits(question, source_hits)
     except Exception as exc:

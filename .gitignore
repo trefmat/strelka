@@ -50,3 +50,7 @@ manual-run-*/
 tests/
 data/books/tmp_test.txt
 scripts/demo.ps1
+manual_qa_tmp/
+manual_qa_tmp2/
+manual_qa_debug/
+manual_qa_debug2/
