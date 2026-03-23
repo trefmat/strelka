@@ -1,10 +1,9 @@
-# OS / editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 
-# Python bytecode / caches
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -15,28 +14,28 @@ __pycache__/
 .coverage.*
 htmlcov/
 
-# Virtual environments
+
 .venv/
 venv/
 env/
 ENV/
 
-# Build / packaging
+
 build/
 dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
 
-# Local environment files
+
 .env
 .env.*
-!.env.example
+.env.example
 
-# Logs
+
 *.log
 
-# Runtime local data / temp artifacts
+
 .tmp/
 .tmp_*/
 .tmp_pytest/
@@ -44,5 +43,7 @@ test-tmp*/
 tmp-run-*/
 manual-run-*/
 
-# Tests
+
 tests/
+data/books/tmp_test.txt
+scripts/demo.ps1

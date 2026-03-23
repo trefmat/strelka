@@ -1,0 +1,39 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Умный поиск по книгам</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Умный поиск по книгам</h1>
+    <p class="subtitle">Локальный тестовый стенд: загрузка TXT, поиск фрагментов и ответы по цитатам.</p>
+
+    <section class="card">
+      <h2>1) Загрузка книги</h2>
+      <input id="bookFile" type="file" accept=".txt" />
+      <button id="uploadBtn">Загрузить</button>
+      <div id="uploadResult" class="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>2) Поиск фрагментов</h2>
+      <input id="searchQuery" placeholder="Например: где говорится про собаку" />
+      <button id="searchBtn">Найти</button>
+      <div id="searchResult" class="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>3) Вопрос по книгам</h2>
+      <p class="hint">Лучше уточнять персонажа, действие и сцену: «Почему Пьер отказался ехать?»</p>
+      <input id="askQuery" placeholder="Например: почему герой принял это решение в этой сцене?" />
+      <button id="askBtn">Спросить</button>
+      <div id="askResult" class="result"></div>
+    </section>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

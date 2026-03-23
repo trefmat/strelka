@@ -1,0 +1,80 @@
+﻿:root {
+  --bg: #f4f2eb;
+  --card: #fffdf8;
+  --ink: #202124;
+  --accent: #1f6f78;
+  --muted: #616161;
+  --line: #dfd9c9;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Arial", sans-serif;
+  background: radial-gradient(circle at top right, #e8efe6 0%, var(--bg) 50%);
+  color: var(--ink);
+}
+.container {
+  max-width: 860px;
+  margin: 32px auto;
+  padding: 0 16px 40px;
+}
+h1 { margin-bottom: 8px; }
+.subtitle { color: var(--muted); margin-top: 0; }
+.hint {
+  margin: 6px 0 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 14px 0;
+}
+input[type="file"], input {
+  width: 100%;
+  margin: 8px 0;
+  border: 1px solid #c8c8c8;
+  padding: 10px;
+  border-radius: 6px;
+}
+button {
+  background: var(--accent);
+  color: white;
+  border: 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.result {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  font-size: 14px;
+}
+.suggestions {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.suggestions li {
+  margin: 4px 0;
+}
+.quote {
+  padding: 8px;
+  border-left: 3px solid var(--accent);
+  background: #f8faf8;
+  margin: 8px 0;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.pager button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
