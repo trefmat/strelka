@@ -6,13 +6,15 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", BASE_URL).rstrip("/")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 API_TIMEOUT = 30
 TG_MESSAGE_LIMIT = 3800
@@ -28,6 +30,37 @@ def _clip(text: str, limit: int = TG_MESSAGE_LIMIT) -> str:
 async def _reply(update: Update, text: str) -> None:
     if update.message:
         await update.message.reply_text(_clip(text))
+
+
+def _reader_url(book: str, start: int, end: int) -> str:
+    params = urlencode(
+        {
+            "book": Path(book).name,
+            "start": max(0, int(start)),
+            "end": max(0, int(end)),
+        }
+    )
+    return f"{WEB_BASE_URL}/reader?{params}"
+
+
+def _focus_start(item: dict[str, Any]) -> int:
+    return int(item.get("focus_start", item.get("offset_start", 0)) or 0)
+
+
+def _focus_end(item: dict[str, Any]) -> int:
+    base = _focus_start(item)
+    end = int(item.get("focus_end", item.get("offset_end", base + 1)) or (base + 1))
+    return end if end > base else (base + 1)
+
+
+async def _reply_with_open_button(update: Update, text: str, *, book: str, start: int, end: int) -> None:
+    if not update.message:
+        return
+    url = _reader_url(book, start, end)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(text="Открыть в книге", url=url)]]
+    )
+    await update.message.reply_text(_clip(text), reply_markup=keyboard)
 
 
 def _request_json(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -157,7 +190,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/use <книга1;книга2> — выбрать книги для поиска\n"
         "/use all — искать по всем книгам\n"
         "/health — статус backend\n\n"
-        "Чтобы загрузить книгу: отправьте боту TXT-файл как документ.",
+        "Чтобы загрузить книгу: отправьте боту файл .txt/.fb2/.epub как документ.",
     )
 
 
@@ -288,10 +321,16 @@ async def find(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _reply(update, "Ничего не найдено.")
         return
 
-    msg = []
+    await _reply(update, f"Найдено фрагментов: {len(snippets)}")
     for snippet in snippets:
-        msg.append(f"{snippet['book']} score={snippet['score']}\n{snippet['quote']}")
-    await _reply(update, "\n\n".join(msg))
+        text = f"{snippet['book']} score={snippet['score']}\n{snippet['quote']}"
+        await _reply_with_open_button(
+            update,
+            text,
+            book=str(snippet.get("book", "")),
+            start=_focus_start(snippet),
+            end=_focus_end(snippet),
+        )
 
 
 async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -323,6 +362,17 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parts.append(f"{idx}. {suggestion}")
 
     await _reply(update, "\n".join(parts))
+
+    sources = data.get("sources") or []
+    for source in sources:
+        text = f"{source.get('book')} score={source.get('score')}\n{source.get('quote')}"
+        await _reply_with_open_button(
+            update,
+            text,
+            book=str(source.get("book", "")),
+            start=_focus_start(source),
+            end=_focus_end(source),
+        )
 
 
 async def upload_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

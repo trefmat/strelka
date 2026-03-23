@@ -49,6 +49,24 @@ button {
   border-radius: 6px;
   cursor: pointer;
 }
+
+.btn-compact {
+  padding: 0 12px;
+  font-size: 13px;
+  line-height: 1;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hidden {
+  display: none;
+}
+
+#readBookBtn {
+  margin-top: 8px;
+}
 .result {
   margin-top: 10px;
   white-space: pre-wrap;
@@ -68,6 +86,48 @@ button {
   margin: 8px 0;
 }
 
+.quote-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.quote-actions .btn-compact {
+  width: fit-content;
+  min-width: 0;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.reader-container {
+  max-width: 1100px;
+}
+
+.reader-toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.reader-text {
+  background: #fbfbfb;
+  border: 1px solid #d7d7d7;
+  border-radius: 8px;
+  padding: 14px;
+  max-height: 72vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 16px;
+}
+
+.reader-hit {
+  background: #ffe88a;
+  color: #2d2400;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
 .pager {
   display: flex;
   align-items: center;
@@ -85,6 +145,21 @@ button {
   grid-template-columns: 1fr auto;
   gap: 8px;
   margin-top: 8px;
+  align-items: center;
+}
+
+.inline-controls select,
+.inline-controls button {
+  margin: 0;
+}
+
+.inline-controls select {
+  height: 42px;
+}
+
+.inline-controls .btn-compact {
+  height: 34px;
+  white-space: nowrap;
 }
 
 label {

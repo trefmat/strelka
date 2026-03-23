@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from html.parser import HTMLParser
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
                                                   
 if __package__ in (None, ""):
@@ -157,7 +157,7 @@ def _is_sentence_fragment(sentence: str) -> bool:
     return False
 
 
-def _focus_quote(chunk, query: str, size: int = 420) -> str:
+def _focus_quote(chunk, query: str, size: int = 420, *, book_text: str | None = None) -> tuple[str, int, int]:
     text = chunk.text
     exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
     query_terms = [t for t in service.preprocessor.tokenize(query) if not service.preprocessor.is_morph_token(t)]
@@ -186,75 +186,98 @@ def _focus_quote(chunk, query: str, size: int = 420) -> str:
             return None
         return pos, pos + len(probe)
 
-    def build_context_window() -> tuple[str, int]:
-        siblings = [c for c in service.store.all_chunks() if c.book == chunk.book]
-        if not siblings:
-            return text, 0
-        siblings.sort(key=lambda c: c.offset_start)
-        idx = next((i for i, c in enumerate(siblings) if c.chunk_id == chunk.chunk_id), -1)
+    def nearest_literal_span(haystack: str, needle: str, expected_start: int, window: int = 5000) -> tuple[int, int] | None:
+        if not needle:
+            return None
+        ws = max(0, expected_start - window)
+        we = min(len(haystack), expected_start + window + len(needle))
+        probe = haystack[ws:we]
+        idx = probe.find(needle)
         if idx < 0:
-            return text, 0
+            return None
+        best_start = ws + idx
+        best_dist = abs(best_start - expected_start)
+        cursor = idx + 1
+        while True:
+            nxt = probe.find(needle, cursor)
+            if nxt < 0:
+                break
+            abs_pos = ws + nxt
+            dist = abs(abs_pos - expected_start)
+            if dist < best_dist:
+                best_dist = dist
+                best_start = abs_pos
+                if dist == 0:
+                    break
+            cursor = nxt + 1
+        return best_start, best_start + len(needle)
 
-        left = idx
-        right = idx
-        total = len(siblings[idx].text)
-        target = max(size * 3, len(siblings[idx].text) + size)
+    base_text = book_text
+    if base_text is None:
+        loaded_text, _ = _read_stored_book_text(chunk.book)
+        base_text = loaded_text
+    if not base_text:
+        base_text = text
 
-        while total < target and (left > 0 or right < len(siblings) - 1):
-            if right < len(siblings) - 1:
-                right += 1
-                total += len(siblings[right].text) + 1
-            if left > 0 and total < target:
-                left -= 1
-                total += len(siblings[left].text) + 1
+    chunk_start = max(0, min(int(chunk.offset_start), len(base_text)))
+    chunk_end = max(chunk_start, min(int(chunk.offset_end), len(base_text)))
+    if chunk_end <= chunk_start:
+        chunk_start = 0
+        chunk_end = len(base_text)
 
-        pieces = [siblings[i].text.strip() for i in range(left, right + 1)]
-        context = " ".join(p for p in pieces if p).strip()
-        prefix = " ".join(pieces[: idx - left]).strip()
-        chunk_offset = len(prefix) + (1 if prefix else 0)
-        return context if context else text, chunk_offset
+    chunk_text = base_text[chunk_start:chunk_end]
+    if not chunk_text:
+        chunk_text = text
 
-    context_text, chunk_offset = build_context_window()
-    anchor = (
-        find_phrase_span(text, query)
-        or find_anchor_span(text, exact_tokens)
-        or find_anchor_span(text, query_terms)
+    anchor_local = (
+        find_phrase_span(chunk_text, query)
+        or find_anchor_span(chunk_text, exact_tokens)
+        or find_anchor_span(chunk_text, query_terms)
     )
-    if anchor:
-        anchor_start, anchor_end = chunk_offset + anchor[0], chunk_offset + anchor[1]
-    else:
-        anchor_in_context = (
-            find_phrase_span(context_text, query)
-            or find_anchor_span(context_text, exact_tokens)
-            or find_anchor_span(context_text, query_terms)
-        )
-        if anchor_in_context:
-            anchor_start, anchor_end = anchor_in_context
+    if anchor_local:
+        expected_start = chunk_start + anchor_local[0]
+        expected_end = chunk_start + anchor_local[1]
+        anchor_piece = chunk_text[anchor_local[0]:anchor_local[1]]
+        remap = nearest_literal_span(base_text, anchor_piece, expected_start)
+        if remap:
+            anchor_start, anchor_end = remap
         else:
-            anchor_start, anchor_end = chunk_offset, chunk_offset + max(1, len(text))
+            anchor_start, anchor_end = expected_start, expected_end
+    else:
+        local_in_original = (
+            find_phrase_span(text, query)
+            or find_anchor_span(text, exact_tokens)
+            or find_anchor_span(text, query_terms)
+        )
+        if local_in_original:
+            anchor_start = chunk_start + local_in_original[0]
+            anchor_end = chunk_start + local_in_original[1]
+        else:
+            anchor_start = chunk_start + max(0, len(chunk_text) // 2)
+            anchor_end = min(len(base_text), anchor_start + 1)
 
     center = (anchor_start + anchor_end) // 2
     half = size // 2
     start = max(0, center - half)
-    end = min(len(context_text), start + size)
+    end = min(len(base_text), start + size)
     start = max(0, end - size)
 
-    core = context_text[start:end].strip()
-    snippet = core
+    core = base_text[start:end]
+    mark_start = max(anchor_start, start)
+    mark_end = min(anchor_end, end)
+    if mark_end > mark_start:
+        rel_s = mark_start - start
+        rel_e = mark_end - start
+        core = core[:rel_s] + "[[" + core[rel_s:rel_e] + "]]" + core[rel_e:]
+
+    snippet = core.strip()
     if start > 0:
         snippet = "... " + snippet
-    if end < len(context_text):
+    if end < len(base_text):
         snippet = snippet + " ..."
-
-    for token in exact_tokens:
-        pattern = re.compile(rf"(?<![A-Za-zА-Яа-яЁё0-9])({re.escape(token)})(?![A-Za-zА-Яа-яЁё0-9])", re.IGNORECASE)
-        match = pattern.search(snippet)
-        if match:
-            s, e = match.span(1)
-            snippet = snippet[:s] + "[[" + snippet[s:e] + "]]" + snippet[e:]
-            break
-
-    return snippet if snippet else _clip(text, size=size)
+    if not snippet:
+        snippet = _clip(text, size=size)
+    return snippet, anchor_start, max(anchor_start + 1, anchor_end)
 
 
 def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool = False) -> list[RetrievalHit]:
@@ -805,9 +828,28 @@ def _preloaded_books() -> list[dict]:
     if not preloaded_dir.exists():
         return []
     items: list[dict] = []
-    for path in sorted(preloaded_dir.glob("*.txt")):
+    for path in sorted(preloaded_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in _SUPPORTED_UPLOAD_EXTENSIONS:
+            continue
         items.append({"book": path.name, "size_bytes": path.stat().st_size})
     return items
+
+
+def _read_stored_book_text(book: str) -> tuple[str | None, str | None]:
+    name = Path(book).name.strip()
+    if not name:
+        return None, "book is required"
+    path = service.store.books_dir / name
+    if not path.exists() or not path.is_file():
+        return None, f"book not found: {name}"
+    raw = path.read_bytes()
+    decoded = _decode_text_bytes(raw)
+    if decoded is None:
+        return None, f"failed to decode book: {name}"
+    normalized = decoded.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized, None
 
 
 def _book_subject_hints(limit: int = 3, scan_chunks: int = 500) -> list[str]:
@@ -902,6 +944,11 @@ def index():
     return send_from_directory(str(web_dir), "index.html")
 
 
+@app.get("/reader")
+def reader():
+    return send_from_directory(str(web_dir), "reader.html")
+
+
 @app.get("/health")
 def health():
     books, chunks = service.stats()
@@ -913,6 +960,16 @@ def list_books():
     counts = _book_chunk_counts()
     books = [{"book": name, "chunks": counts[name]} for name in sorted(counts.keys())]
     return jsonify({"total": len(books), "books": books})
+
+
+@app.get("/books/content")
+def book_content():
+    book = str(request.args.get("book", "")).strip()
+    text, error = _read_stored_book_text(book)
+    if error:
+        code = 404 if "not found" in error else 400
+        return jsonify({"detail": error}), code
+    return Response(text, mimetype="text/plain; charset=utf-8")
 
 
 @app.get("/books/preloaded")
@@ -1038,18 +1095,31 @@ def search_snippets():
     end_idx = start_idx + page_size
     hits = all_hits[start_idx:end_idx]
 
-    snippets = [
-        {
-            "rank": start_idx + i + 1,
-            "chunk_id": h.chunk.chunk_id,
-            "book": h.chunk.book,
-            "offset_start": h.chunk.offset_start,
-            "offset_end": h.chunk.offset_end,
-            "score": round(h.score, 4),
-            "quote": _focus_quote(h.chunk, query, size=quote_size),
-        }
-        for i, h in enumerate(hits)
-    ]
+    book_text_cache: dict[str, str] = {}
+    snippets = []
+    for i, h in enumerate(hits):
+        if h.chunk.book not in book_text_cache:
+            text_cached, _ = _read_stored_book_text(h.chunk.book)
+            book_text_cache[h.chunk.book] = text_cached or ""
+        quote, focus_start, focus_end = _focus_quote(
+            h.chunk,
+            query,
+            size=quote_size,
+            book_text=book_text_cache.get(h.chunk.book),
+        )
+        snippets.append(
+            {
+                "rank": start_idx + i + 1,
+                "chunk_id": h.chunk.chunk_id,
+                "book": h.chunk.book,
+                "offset_start": h.chunk.offset_start,
+                "offset_end": h.chunk.offset_end,
+                "focus_start": focus_start,
+                "focus_end": focus_end,
+                "score": round(h.score, 4),
+                "quote": quote,
+            }
+        )
 
     result = {
         "query": query_raw,
@@ -1121,17 +1191,30 @@ def ask():
 
     source_hits = result.hits
 
-    sources = [
-        {
-            "chunk_id": h.chunk.chunk_id,
-            "book": h.chunk.book,
-            "offset_start": h.chunk.offset_start,
-            "offset_end": h.chunk.offset_end,
-            "score": round(h.score, 4),
-            "quote": _focus_quote(h.chunk, question, size=quote_size),
-        }
-        for h in source_hits
-    ]
+    source_cache: dict[str, str] = {}
+    sources = []
+    for h in source_hits:
+        if h.chunk.book not in source_cache:
+            text_cached, _ = _read_stored_book_text(h.chunk.book)
+            source_cache[h.chunk.book] = text_cached or ""
+        quote, focus_start, focus_end = _focus_quote(
+            h.chunk,
+            question,
+            size=quote_size,
+            book_text=source_cache.get(h.chunk.book),
+        )
+        sources.append(
+            {
+                "chunk_id": h.chunk.chunk_id,
+                "book": h.chunk.book,
+                "offset_start": h.chunk.offset_start,
+                "offset_end": h.chunk.offset_end,
+                "focus_start": focus_start,
+                "focus_end": focus_end,
+                "score": round(h.score, 4),
+                "quote": quote,
+            }
+        )
 
     response = {
         "question": question_raw,

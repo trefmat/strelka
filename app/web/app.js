@@ -5,6 +5,53 @@
   return Math.max(120, Math.min(2400, raw));
 }
 
+function toSafeInt(value, fallback = 0) {
+  const n = Number.parseInt(String(value), 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+function openReader(book, start = 0, end = 0) {
+  if (!book) return;
+  const params = new URLSearchParams({
+    book,
+    start: String(Math.max(0, toSafeInt(start, 0))),
+    end: String(Math.max(0, toSafeInt(end, 0))),
+  });
+  window.open(`/reader?${params.toString()}`, '_blank');
+}
+
+function pickFocusStart(item) {
+  return item.focus_start ?? item.offset_start ?? 0;
+}
+
+function pickFocusEnd(item) {
+  return item.focus_end ?? item.offset_end ?? pickFocusStart(item);
+}
+
+const uiState = {
+  lastUploadedBook: '',
+};
+
+function setLastUploadedBook(book) {
+  uiState.lastUploadedBook = book || '';
+  const btn = document.getElementById('readBookBtn');
+  if (!btn) return;
+  if (uiState.lastUploadedBook) {
+    btn.classList.remove('hidden');
+  } else {
+    btn.classList.add('hidden');
+  }
+}
+
+function bindOpenButtons(root) {
+  const container = root || document;
+  container.querySelectorAll('.openBookBtn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openReader(btn.dataset.book, btn.dataset.start, btn.dataset.end);
+    });
+  });
+}
+
 async function loadPreloadedMenu() {
   const select = document.getElementById('preloadedBook');
   if (!select) return;
@@ -43,6 +90,7 @@ async function loadPreloadedBook() {
     return;
   }
 
+  out.textContent = 'Обработка...';
   const res = await fetch('/books/load_preloaded', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -52,6 +100,9 @@ async function loadPreloadedBook() {
   out.textContent = res.ok
     ? `OK: ${data.book}, chunks=${data.chunks_added}`
     : `Ошибка: ${data.detail ?? 'unknown'}`;
+  if (res.ok && data.book) {
+    setLastUploadedBook(data.book);
+  }
 }
 
 async function uploadBook() {
@@ -61,11 +112,16 @@ async function uploadBook() {
     out.textContent = 'Выберите файл .txt, .fb2 или .epub';
     return;
   }
+
+  out.textContent = 'Обработка...';
   const form = new FormData();
   form.append('file', fileInput.files[0]);
   const res = await fetch('/books/upload', { method: 'POST', body: form });
   const data = await res.json();
   out.textContent = res.ok ? `OK: ${data.book}, chunks=${data.chunks_added}` : `Ошибка: ${data.detail ?? 'unknown'}`;
+  if (res.ok && data.book) {
+    setLastUploadedBook(data.book);
+  }
 }
 
 const searchState = {
@@ -87,6 +143,9 @@ function renderSearchSnippets(data) {
       <div class="quote">
         <b>${rank}. ${s.book}</b> [${s.offset_start}-${s.offset_end}] score=${s.score}<br/>
         ${s.quote}
+        <div class="quote-actions">
+          <button class="btn-compact openBookBtn" data-book="${s.book}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
+        </div>
       </div>
     `;
   }).join('');
@@ -109,10 +168,12 @@ function renderSearchSnippets(data) {
   if (nextBtn) {
     nextBtn.addEventListener('click', () => fetchSearchPage(searchState.page + 1));
   }
+  bindOpenButtons(out);
 }
 
 async function fetchSearchPage(page) {
   const out = document.getElementById('searchResult');
+  out.textContent = 'Обработка...';
   const res = await fetch('/search/snippets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -151,6 +212,8 @@ async function askQuestion() {
     out.textContent = 'Введите вопрос';
     return;
   }
+
+  out.textContent = 'Обработка...';
   const res = await fetch('/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -173,17 +236,26 @@ async function askQuestion() {
     <div class="quote">
       <b>${i + 1}. ${s.book}</b> [${s.offset_start}-${s.offset_end}] score=${s.score}<br/>
       ${s.quote}
+      <div class="quote-actions">
+        <button class="btn-compact openBookBtn" data-book="${s.book}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
+      </div>
     </div>
   `).join('');
   const tips = suggestions.length
     ? `<br/><br/><b>Как переформулировать вопрос:</b><ul class="suggestions">${suggestions.map((q) => `<li>${q}</li>`).join('')}</ul>`
     : '';
   out.innerHTML = `<b>Ответ:</b> ${data.answer}<br/><br/><b>Источники:</b>${sources || '<br/>нет'}${tips}`;
+  bindOpenButtons(out);
 }
 
 document.getElementById('uploadBtn').addEventListener('click', uploadBook);
 document.getElementById('loadPreloadedBtn').addEventListener('click', loadPreloadedBook);
 document.getElementById('searchBtn').addEventListener('click', searchSnippets);
 document.getElementById('askBtn').addEventListener('click', askQuestion);
+
+document.getElementById('readBookBtn').addEventListener('click', () => {
+  if (!uiState.lastUploadedBook) return;
+  openReader(uiState.lastUploadedBook, 0, 0);
+});
 
 loadPreloadedMenu();
