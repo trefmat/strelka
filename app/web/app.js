@@ -1,8 +1,64 @@
-﻿async function uploadBook() {
+﻿function getQuoteSize() {
+  const input = document.getElementById('quoteSize');
+  const raw = Number.parseInt(input?.value ?? '420', 10);
+  if (Number.isNaN(raw)) return 420;
+  return Math.max(120, Math.min(2400, raw));
+}
+
+async function loadPreloadedMenu() {
+  const select = document.getElementById('preloadedBook');
+  if (!select) return;
+
+  const previous = select.value;
+  select.innerHTML = '<option value="">Выберите предзагруженную книгу</option>';
+
+  try {
+    const res = await fetch('/books/preloaded');
+    const data = await res.json();
+    if (!res.ok) {
+      return;
+    }
+    const books = Array.isArray(data.books) ? data.books : [];
+    for (const item of books) {
+      if (!item || !item.book) continue;
+      const opt = document.createElement('option');
+      opt.value = item.book;
+      const kb = item.size_bytes ? `${Math.round(item.size_bytes / 1024)} KB` : 'txt';
+      opt.textContent = `${item.book} (${kb})`;
+      select.appendChild(opt);
+    }
+    if (previous) {
+      select.value = previous;
+    }
+  } catch (err) {
+  }
+}
+
+async function loadPreloadedBook() {
+  const out = document.getElementById('uploadResult');
+  const select = document.getElementById('preloadedBook');
+  const book = select?.value?.trim();
+  if (!book) {
+    out.textContent = 'Выберите книгу из предустановленных';
+    return;
+  }
+
+  const res = await fetch('/books/load_preloaded', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book }),
+  });
+  const data = await res.json();
+  out.textContent = res.ok
+    ? `OK: ${data.book}, chunks=${data.chunks_added}`
+    : `Ошибка: ${data.detail ?? 'unknown'}`;
+}
+
+async function uploadBook() {
   const out = document.getElementById('uploadResult');
   const fileInput = document.getElementById('bookFile');
   if (!fileInput.files.length) {
-    out.textContent = 'Выберите .txt файл';
+    out.textContent = 'Выберите файл .txt, .fb2 или .epub';
     return;
   }
   const form = new FormData();
@@ -60,7 +116,12 @@ async function fetchSearchPage(page) {
   const res = await fetch('/search/snippets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: searchState.query, page, page_size: searchState.pageSize }),
+    body: JSON.stringify({
+      query: searchState.query,
+      page,
+      page_size: searchState.pageSize,
+      quote_size: getQuoteSize(),
+    }),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -93,7 +154,7 @@ async function askQuestion() {
   const res = await fetch('/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, top_k: 5 }),
+    body: JSON.stringify({ question, top_k: 5, quote_size: getQuoteSize() }),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -121,5 +182,8 @@ async function askQuestion() {
 }
 
 document.getElementById('uploadBtn').addEventListener('click', uploadBook);
+document.getElementById('loadPreloadedBtn').addEventListener('click', loadPreloadedBook);
 document.getElementById('searchBtn').addEventListener('click', searchSnippets);
 document.getElementById('askBtn').addEventListener('click', askQuestion);
+
+loadPreloadedMenu();

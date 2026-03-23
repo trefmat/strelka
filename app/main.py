@@ -1,10 +1,15 @@
 ﻿from __future__ import annotations
 
 from collections import Counter
+from io import BytesIO
+import html as html_lib
 import math
 import re
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
+import zipfile
+from html.parser import HTMLParser
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -20,6 +25,7 @@ from app.core.retrieve import RetrievalHit
 
 service = RagService()
 web_dir = Path(__file__).parent / "web"
+preloaded_dir = Path(__file__).resolve().parent.parent / "examples" / "preloaded"
 
 app = Flask(__name__, static_folder=str(web_dir), static_url_path="/web")
 
@@ -78,6 +84,7 @@ _WEAK_QUERY_PREFIXES = (
     "объясня",
     "отмеча",
 )
+_SUPPORTED_UPLOAD_EXTENSIONS = {".txt", ".fb2", ".epub"}
 
 
 def _clip(text: str, size: int = 360) -> str:
@@ -150,92 +157,95 @@ def _is_sentence_fragment(sentence: str) -> bool:
     return False
 
 
-def _focus_quote(text: str, query: str, size: int = 420) -> str:
+def _focus_quote(chunk, query: str, size: int = 420) -> str:
+    text = chunk.text
     exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
-    query_terms = {t for t in service.preprocessor.tokenize(query) if not service.preprocessor.is_morph_token(t)}
-    sentences = [s.strip() for s in service.preprocessor.split_sentences(text) if s.strip()]
-    if not sentences:
-        return _clip(text, size=size)
+    query_terms = [t for t in service.preprocessor.tokenize(query) if not service.preprocessor.is_morph_token(t)]
+    size = max(120, int(size))
 
-    def sentence_relevance(sentence: str) -> tuple[float, int]:
-        exact = _whole_word_match_count(sentence, exact_tokens)
-        sentence_terms = set(service.preprocessor.tokenize(sentence))
-        stem_overlap = len(query_terms & sentence_terms) if query_terms else 0
-        score = float(exact * 3 + stem_overlap)
-        if _is_sentence_fragment(sentence):
-            score -= 0.8
-        return score, exact
+    def find_anchor_span(haystack: str, tokens: list[str]) -> tuple[int, int] | None:
+        for token in sorted(set(tokens), key=len, reverse=True):
+            if len(token) < 2:
+                continue
+            pattern = re.compile(
+                rf"(?<![A-Za-zА-Яа-яЁё0-9])({re.escape(token)})(?![A-Za-zА-Яа-яЁё0-9])",
+                re.IGNORECASE,
+            )
+            match = pattern.search(haystack)
+            if match:
+                return match.span(1)
+        return None
 
-    ranked: list[tuple[int, float, int]] = []
-    for idx, sentence in enumerate(sentences):
-        score, exact = sentence_relevance(sentence)
-        ranked.append((idx, score, exact))
-    ranked.sort(key=lambda item: (item[1], item[2]), reverse=True)
-    best_idx = ranked[0][0]
+    def find_phrase_span(haystack: str, phrase: str) -> tuple[int, int] | None:
+        probe = " ".join(phrase.lower().split())
+        if len(probe) < 3:
+            return None
+        lower = haystack.lower()
+        pos = lower.find(probe)
+        if pos < 0:
+            return None
+        return pos, pos + len(probe)
 
-                                                                                     
-    left = best_idx
-    right = best_idx
-    target_min_len = max(180, int(size * 0.62))
-    max_len = max(size, target_min_len)
+    def build_context_window() -> tuple[str, int]:
+        siblings = [c for c in service.store.all_chunks() if c.book == chunk.book]
+        if not siblings:
+            return text, 0
+        siblings.sort(key=lambda c: c.offset_start)
+        idx = next((i for i, c in enumerate(siblings) if c.chunk_id == chunk.chunk_id), -1)
+        if idx < 0:
+            return text, 0
 
-    def build_snippet(l: int, r: int) -> str:
-        core = " ".join(sentences[l : r + 1]).strip()
-        if l > 0:
-            core = "... " + core
-        if r < len(sentences) - 1:
-            core = core + " ..."
-        return core
+        left = idx
+        right = idx
+        total = len(siblings[idx].text)
+        target = max(size * 3, len(siblings[idx].text) + size)
 
-                                                                               
-    while len(build_snippet(left, right)) < target_min_len and (left > 0 or right < len(sentences) - 1):
-        can_left = left > 0
-        can_right = right < len(sentences) - 1
-        if can_left and can_right:
-            left_distance = best_idx - (left - 1)
-            right_distance = (right + 1) - best_idx
-            if left_distance <= right_distance:
-                left -= 1
-            else:
+        while total < target and (left > 0 or right < len(siblings) - 1):
+            if right < len(siblings) - 1:
                 right += 1
-        elif can_left:
-            left -= 1
+                total += len(siblings[right].text) + 1
+            if left > 0 and total < target:
+                left -= 1
+                total += len(siblings[left].text) + 1
+
+        pieces = [siblings[i].text.strip() for i in range(left, right + 1)]
+        context = " ".join(p for p in pieces if p).strip()
+        prefix = " ".join(pieces[: idx - left]).strip()
+        chunk_offset = len(prefix) + (1 if prefix else 0)
+        return context if context else text, chunk_offset
+
+    context_text, chunk_offset = build_context_window()
+    anchor = (
+        find_phrase_span(text, query)
+        or find_anchor_span(text, exact_tokens)
+        or find_anchor_span(text, query_terms)
+    )
+    if anchor:
+        anchor_start, anchor_end = chunk_offset + anchor[0], chunk_offset + anchor[1]
+    else:
+        anchor_in_context = (
+            find_phrase_span(context_text, query)
+            or find_anchor_span(context_text, exact_tokens)
+            or find_anchor_span(context_text, query_terms)
+        )
+        if anchor_in_context:
+            anchor_start, anchor_end = anchor_in_context
         else:
-            right += 1
+            anchor_start, anchor_end = chunk_offset, chunk_offset + max(1, len(text))
 
-                                                                                
-    while len(build_snippet(left, right)) < target_min_len and (left > 0 or right < len(sentences) - 1):
-        left_score = sentence_relevance(sentences[left - 1])[0] if left > 0 else -999.0
-        right_score = sentence_relevance(sentences[right + 1])[0] if right < len(sentences) - 1 else -999.0
-        if right_score > left_score and right < len(sentences) - 1:
-            right += 1
-        elif left > 0:
-            left -= 1
-        elif right < len(sentences) - 1:
-            right += 1
-        else:
-            break
+    center = (anchor_start + anchor_end) // 2
+    half = size // 2
+    start = max(0, center - half)
+    end = min(len(context_text), start + size)
+    start = max(0, end - size)
 
-                                                 
-    while len(build_snippet(left, right)) > max_len and (left < best_idx or right > best_idx):
-        left_distance = best_idx - left
-        right_distance = right - best_idx
-        if right_distance >= left_distance and right > best_idx:
-            right -= 1
-        elif left < best_idx:
-            left += 1
-        else:
-            break
+    core = context_text[start:end].strip()
+    snippet = core
+    if start > 0:
+        snippet = "... " + snippet
+    if end < len(context_text):
+        snippet = snippet + " ..."
 
-                                                                  
-    while left < best_idx and _is_sentence_fragment(sentences[left]):
-        left += 1
-    while right > best_idx and _is_sentence_fragment(sentences[right]):
-        right -= 1
-
-    snippet = build_snippet(left, right)
-
-                                         
     for token in exact_tokens:
         pattern = re.compile(rf"(?<![A-Za-zА-Яа-яЁё0-9])({re.escape(token)})(?![A-Za-zА-Яа-яЁё0-9])", re.IGNORECASE)
         match = pattern.search(snippet)
@@ -244,7 +254,7 @@ def _focus_quote(text: str, query: str, size: int = 420) -> str:
             snippet = snippet[:s] + "[[" + snippet[s:e] + "]]" + snippet[e:]
             break
 
-    return snippet
+    return snippet if snippet else _clip(text, size=size)
 
 
 def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool = False) -> list[RetrievalHit]:
@@ -621,6 +631,185 @@ def _parse_books_filter(payload: dict) -> tuple[set[str] | None, str | None]:
     return selected, None
 
 
+def _parse_quote_size(payload: dict, *, default: int = 420, min_size: int = 120, max_size: int = 2400) -> tuple[int, str | None]:
+    raw = payload.get("quote_size", default)
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        return default, "quote_size must be integer"
+    if size < min_size or size > max_size:
+        return default, f"quote_size must be between {min_size} and {max_size}"
+    return size, None
+
+
+class _HtmlTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style"}:
+            self._skip_depth += 1
+        if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self._skip_depth > 0:
+            self._skip_depth -= 1
+        if tag in {"p", "div", "li", "section", "article"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        if data and data.strip():
+            self.parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self.parts)
+
+
+def _normalize_extracted_text(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    non_empty = [line for line in lines if line]
+    return "\n".join(non_empty).strip()
+
+
+def _decode_text_bytes(raw: bytes) -> str | None:
+    for enc in ("utf-8-sig", "utf-8", "cp1251", "utf-16"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def _extract_fb2_text(raw: bytes) -> str | None:
+    decoded = _decode_text_bytes(raw)
+    if decoded is None:
+        return None
+    try:
+        root = ET.fromstring(decoded)
+    except ET.ParseError:
+        return None
+    parts: list[str] = []
+    for elem in root.iter():
+        if elem.text and elem.text.strip():
+            parts.append(elem.text.strip())
+    if not parts:
+        return None
+    return _normalize_extracted_text("\n".join(parts))
+
+
+def _extract_epub_text(raw: bytes) -> str | None:
+    try:
+        archive = zipfile.ZipFile(BytesIO(raw))
+    except zipfile.BadZipFile:
+        return None
+
+    with archive:
+        names = set(archive.namelist())
+        opf_path = None
+        if "META-INF/container.xml" in names:
+            try:
+                container_xml = archive.read("META-INF/container.xml")
+                container_root = ET.fromstring(container_xml)
+                for elem in container_root.iter():
+                    if elem.tag.endswith("rootfile"):
+                        candidate = elem.attrib.get("full-path")
+                        if candidate:
+                            opf_path = candidate
+                            break
+            except Exception:
+                opf_path = None
+
+        html_paths: list[str] = []
+        if opf_path and opf_path in names:
+            try:
+                opf_xml = archive.read(opf_path)
+                opf_root = ET.fromstring(opf_xml)
+                base_dir = str(Path(opf_path).parent).replace("\\", "/")
+                manifest_by_id: dict[str, str] = {}
+                for elem in opf_root.iter():
+                    if elem.tag.endswith("item"):
+                        item_id = elem.attrib.get("id")
+                        href = elem.attrib.get("href")
+                        media = (elem.attrib.get("media-type") or "").lower()
+                        if not item_id or not href:
+                            continue
+                        if "html" in media or href.lower().endswith((".xhtml", ".html", ".htm")):
+                            joined = f"{base_dir}/{href}" if base_dir and base_dir != "." else href
+                            manifest_by_id[item_id] = joined
+                for elem in opf_root.iter():
+                    if elem.tag.endswith("itemref"):
+                        item_idref = elem.attrib.get("idref")
+                        if item_idref and item_idref in manifest_by_id:
+                            html_paths.append(manifest_by_id[item_idref])
+            except Exception:
+                html_paths = []
+
+        if not html_paths:
+            html_paths = sorted(
+                name for name in names
+                if name.lower().endswith((".xhtml", ".html", ".htm")) and not name.lower().startswith("meta-inf/")
+            )
+
+        extracted_blocks: list[str] = []
+        for path in html_paths:
+            if path not in names:
+                continue
+            try:
+                content = archive.read(path)
+            except KeyError:
+                continue
+            decoded = _decode_text_bytes(content)
+            if decoded is None:
+                continue
+            parser = _HtmlTextExtractor()
+            try:
+                parser.feed(decoded)
+                parser.close()
+            except Exception:
+                continue
+            text = _normalize_extracted_text(html_lib.unescape(parser.text()))
+            if text:
+                extracted_blocks.append(text)
+
+        if not extracted_blocks:
+            return None
+        return _normalize_extracted_text("\n\n".join(extracted_blocks))
+
+
+def _extract_upload_text(filename: str, raw: bytes) -> tuple[str | None, str | None]:
+    ext = Path(filename).suffix.lower()
+    if ext == ".txt":
+        decoded = _decode_text_bytes(raw)
+        if decoded is None:
+            return None, "File encoding must be UTF-8, UTF-16 or CP1251"
+        return decoded, None
+    if ext == ".fb2":
+        text = _extract_fb2_text(raw)
+        if not text:
+            return None, "Failed to parse FB2 file"
+        return text, None
+    if ext == ".epub":
+        text = _extract_epub_text(raw)
+        if not text:
+            return None, "Failed to parse EPUB file"
+        return text, None
+    return None, "Only .txt, .fb2 and .epub files are supported"
+
+
+def _preloaded_books() -> list[dict]:
+    if not preloaded_dir.exists():
+        return []
+    items: list[dict] = []
+    for path in sorted(preloaded_dir.glob("*.txt")):
+        items.append({"book": path.name, "size_bytes": path.stat().st_size})
+    return items
+
+
 def _book_subject_hints(limit: int = 3, scan_chunks: int = 500) -> list[str]:
     counts: Counter[str] = Counter()
     display_tokens: dict[str, str] = {}
@@ -726,24 +915,48 @@ def list_books():
     return jsonify({"total": len(books), "books": books})
 
 
+@app.get("/books/preloaded")
+def list_preloaded_books():
+    items = _preloaded_books()
+    return jsonify({"total": len(items), "books": items})
+
+
+@app.post("/books/load_preloaded")
+def load_preloaded_book():
+    payload = request.get_json(silent=True) or {}
+    book = Path(str(payload.get("book", "")).strip()).name
+    if not book:
+        return jsonify({"detail": "book is required"}), 400
+    if Path(book).suffix.lower() not in _SUPPORTED_UPLOAD_EXTENSIONS:
+        return jsonify({"detail": "Only .txt, .fb2 and .epub files are supported"}), 400
+
+    path = preloaded_dir / book
+    if not path.exists() or not path.is_file():
+        return jsonify({"detail": f"preloaded book not found: {book}"}), 404
+
+    raw = path.read_bytes()
+    content, error = _extract_upload_text(book, raw)
+    if error:
+        return jsonify({"detail": error}), 400
+    if not content.strip():
+        return jsonify({"detail": "Preloaded book is empty"}), 400
+
+    added = service.upload_book(book, content)
+    return jsonify({"book": book, "chunks_added": added, "message": "Preloaded book uploaded and indexed"})
+
+
 @app.post("/books/upload")
 def upload_book():
     file = request.files.get("file")
     if not file or not file.filename:
         return jsonify({"detail": "file is required"}), 400
-    if not file.filename.lower().endswith(".txt"):
-        return jsonify({"detail": "Only .txt files are supported"}), 400
+    if Path(file.filename).suffix.lower() not in _SUPPORTED_UPLOAD_EXTENSIONS:
+        return jsonify({"detail": "Only .txt, .fb2 and .epub files are supported"}), 400
 
     raw = file.read()
-    content = None
-    for enc in ("utf-8", "cp1251"):
-        try:
-            content = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    if content is None:
-        return jsonify({"detail": "File encoding must be UTF-8 or CP1251"}), 400
+    content, error = _extract_upload_text(file.filename, raw)
+    if error:
+        return jsonify({"detail": error}), 400
     if not content.strip():
         return jsonify({"detail": "Book is empty"}), 400
 
@@ -761,6 +974,9 @@ def search_snippets():
     allowed_books, filter_error = _parse_books_filter(payload)
     if filter_error:
         return jsonify({"detail": filter_error}), 400
+    quote_size, quote_error = _parse_quote_size(payload)
+    if quote_error:
+        return jsonify({"detail": quote_error}), 400
 
     try:
         page = int(payload.get("page", 1))
@@ -830,7 +1046,7 @@ def search_snippets():
             "offset_start": h.chunk.offset_start,
             "offset_end": h.chunk.offset_end,
             "score": round(h.score, 4),
-            "quote": _focus_quote(h.chunk.text, query),
+            "quote": _focus_quote(h.chunk, query, size=quote_size),
         }
         for i, h in enumerate(hits)
     ]
@@ -846,6 +1062,7 @@ def search_snippets():
         "has_prev": page > 1,
         "has_next": page < total_pages,
         "match_mode": match_mode,
+        "quote_size": quote_size,
     }
     if allowed_books is not None:
         result["books_filter"] = sorted(allowed_books)
@@ -864,6 +1081,9 @@ def ask():
     allowed_books, filter_error = _parse_books_filter(payload)
     if filter_error:
         return jsonify({"detail": filter_error}), 400
+    quote_size, quote_error = _parse_quote_size(payload)
+    if quote_error:
+        return jsonify({"detail": quote_error}), 400
 
     core_terms = service.preprocessor.core_query_terms(question)
     meaningful_terms = service.preprocessor.meaningful_query_terms(question)
@@ -908,12 +1128,18 @@ def ask():
             "offset_start": h.chunk.offset_start,
             "offset_end": h.chunk.offset_end,
             "score": round(h.score, 4),
-            "quote": _focus_quote(h.chunk.text, question),
+            "quote": _focus_quote(h.chunk, question, size=quote_size),
         }
         for h in source_hits
     ]
 
-    response = {"question": question_raw, "normalized_question": question, "answer": result.answer, "sources": sources}
+    response = {
+        "question": question_raw,
+        "normalized_question": question,
+        "answer": result.answer,
+        "sources": sources,
+        "quote_size": quote_size,
+    }
     if allowed_books is not None:
         response["books_filter"] = sorted(allowed_books)
     if result.message:

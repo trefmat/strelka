@@ -9,17 +9,25 @@
 <body>
   <main class="container">
     <h1>Умный поиск по книгам</h1>
-    <p class="subtitle">Локальный тестовый стенд: загрузка TXT, поиск фрагментов и ответы по цитатам.</p>
+    <p class="subtitle">Локальный тестовый стенд: загрузка .txt/.fb2/.epub, поиск фрагментов и ответы по цитатам.</p>
 
     <section class="card">
       <h2>1) Загрузка книги</h2>
-      <input id="bookFile" type="file" accept=".txt" />
+      <input id="bookFile" type="file" accept=".txt,.fb2,.epub" />
       <button id="uploadBtn">Загрузить</button>
+      <div class="inline-controls">
+        <select id="preloadedBook">
+          <option value="">Выберите предзагруженную книгу</option>
+        </select>
+        <button id="loadPreloadedBtn">Загрузить из предустановленных</button>
+      </div>
       <div id="uploadResult" class="result"></div>
     </section>
 
     <section class="card">
       <h2>2) Поиск фрагментов</h2>
+      <label for="quoteSize">Размер выводимого фрагмента (символов):</label>
+      <input id="quoteSize" type="number" min="120" max="2400" step="20" value="420" />
       <input id="searchQuery" placeholder="Например: где говорится про собаку" />
       <button id="searchBtn">Найти</button>
       <div id="searchResult" class="result"></div>

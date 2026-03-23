@@ -331,8 +331,8 @@ async def upload_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     document = update.message.document
     filename = (document.file_name or "book.txt").strip()
-    if not filename.lower().endswith(".txt"):
-        await _reply(update, "Поддерживаются только .txt файлы.")
+    if not filename.lower().endswith((".txt", ".fb2", ".epub")):
+        await _reply(update, "Поддерживаются файлы .txt, .fb2 и .epub.")
         return
 
     try:
@@ -384,7 +384,6 @@ def main() -> None:
     app.add_handler(CommandHandler("ask", ask))
     app.add_handler(MessageHandler(filters.Document.ALL, upload_document))
 
-    # Python 3.14+: создаем loop явно, чтобы run_polling() работал корректно.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

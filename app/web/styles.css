@@ -33,12 +33,13 @@ h1 { margin-bottom: 8px; }
   padding: 16px;
   margin: 14px 0;
 }
-input[type="file"], input {
+input[type="file"], input, select {
   width: 100%;
   margin: 8px 0;
   border: 1px solid #c8c8c8;
   padding: 10px;
   border-radius: 6px;
+  background: #fff;
 }
 button {
   background: var(--accent);
@@ -77,4 +78,18 @@ button {
 .pager button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.inline-controls {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+label {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 14px;
 }
