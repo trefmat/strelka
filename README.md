@@ -26,6 +26,11 @@
 
 ## 2. Как запустить сервис
 
+### Запускать не обязательно:
+Все уже запущено и работает
+https://books.undo.it/ - сайт
+@smart_book_search_bot - Telegram бот
+
 ### Установка
 ```bash
 python -m venv .venv
