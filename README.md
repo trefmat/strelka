@@ -27,9 +27,9 @@
 ## 2. Как запустить сервис
 
 ### Запускать не обязательно:
-Все уже запущено и работает
-https://books.undo.it/ - сайт
-@smart_book_search_bot - Telegram бот
+Все уже запущено и работает  
+https://books.undo.it/ - сайт  
+[@smart_book_search_bot](https://t.me/smart_book_search_bot#) - Telegram бот
 
 ### Установка
 ```bash
