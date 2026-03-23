@@ -511,7 +511,7 @@ def _extend_with_fallback_hits(
     return selected
 
 
-def _lexical_fallback_hits(query: str, top_k: int) -> list[RetrievalHit]:
+def _lexical_fallback_hits(query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
     exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
     core_terms = service.preprocessor.core_query_terms(query)
     expanded_terms = set(service.preprocessor.tokenize(query))
@@ -522,6 +522,8 @@ def _lexical_fallback_hits(query: str, top_k: int) -> list[RetrievalHit]:
     candidates: list[tuple[float, RetrievalHit]] = []
 
     for chunk in service.store.all_chunks():
+        if allowed_books is not None and chunk.book not in allowed_books:
+            continue
         exact_count = _whole_word_match_count(chunk.text, exact_tokens)
         chunk_terms = set(service.preprocessor.tokenize(chunk.text, include_synonyms=False))
         core_overlap = len(core_terms & chunk_terms) if core_terms else 0
@@ -544,7 +546,7 @@ def _lexical_fallback_hits(query: str, top_k: int) -> list[RetrievalHit]:
     return [RetrievalHit(chunk=hit.chunk, score=(raw / max_raw)) for raw, hit in top]
 
 
-def _exact_match_hits(query: str, top_k: int) -> list[RetrievalHit]:
+def _exact_match_hits(query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
     exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
     if not exact_tokens:
         return []
@@ -553,6 +555,8 @@ def _exact_match_hits(query: str, top_k: int) -> list[RetrievalHit]:
     candidates: list[tuple[float, RetrievalHit]] = []
 
     for chunk in service.store.all_chunks():
+        if allowed_books is not None and chunk.book not in allowed_books:
+            continue
         exact_count = _whole_word_match_count(chunk.text, exact_tokens)
         if exact_count <= 0:
             continue
@@ -582,6 +586,39 @@ def _effective_anchor_terms(meaningful_terms: set[str], core_terms: set[str]) ->
         return set()
     strong_terms = {term for term in anchor_terms if not _is_weak_query_term(term)}
     return strong_terms if strong_terms else anchor_terms
+
+
+def _book_chunk_counts() -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for chunk in service.store.all_chunks():
+        counts[chunk.book] += 1
+    return counts
+
+
+def _parse_books_filter(payload: dict) -> tuple[set[str] | None, str | None]:
+    raw_books = payload.get("books")
+    if raw_books is None:
+        return None, None
+    if not isinstance(raw_books, list):
+        return None, "books must be an array of strings"
+
+    normalized: list[str] = []
+    for item in raw_books:
+        if not isinstance(item, str):
+            return None, "books must be an array of strings"
+        name = Path(item).name.strip()
+        if name:
+            normalized.append(name)
+
+    selected = set(normalized)
+    if not selected:
+        return set(), None
+
+    available = set(_book_chunk_counts().keys())
+    unknown = sorted(selected - available)
+    if unknown:
+        return None, f"unknown books: {', '.join(unknown)}"
+    return selected, None
 
 
 def _book_subject_hints(limit: int = 3, scan_chunks: int = 500) -> list[str]:
@@ -682,6 +719,13 @@ def health():
     return jsonify({"status": "ok", "books": books, "chunks": chunks})
 
 
+@app.get("/books")
+def list_books():
+    counts = _book_chunk_counts()
+    books = [{"book": name, "chunks": counts[name]} for name in sorted(counts.keys())]
+    return jsonify({"total": len(books), "books": books})
+
+
 @app.post("/books/upload")
 def upload_book():
     file = request.files.get("file")
@@ -714,6 +758,9 @@ def search_snippets():
     query = service.preprocessor.normalize_query(query_raw)
     if not query:
         return jsonify({"detail": "query is required"}), 400
+    allowed_books, filter_error = _parse_books_filter(payload)
+    if filter_error:
+        return jsonify({"detail": filter_error}), 400
 
     try:
         page = int(payload.get("page", 1))
@@ -727,10 +774,20 @@ def search_snippets():
     page = max(1, page)
     page_size = max(1, min(page_size, settings.search_page_size_max))
 
-    all_chunk_count = max(1, len(service.store.all_chunks()))
+    all_chunks = service.store.all_chunks()
+    if allowed_books is None:
+        scoped_chunk_count = len(all_chunks)
+    else:
+        scoped_chunk_count = sum(1 for chunk in all_chunks if chunk.book in allowed_books)
+    all_chunk_count = max(1, scoped_chunk_count)
+
     try:
-        semantic_hits = service.search_snippets(query, top_k=settings.retrieval_top_k_max)
-        fallback_hits = _lexical_fallback_hits(query, top_k=all_chunk_count)
+        semantic_hits = service.search_snippets(
+            query,
+            top_k=settings.retrieval_top_k_max,
+            allowed_books=allowed_books,
+        )
+        fallback_hits = _lexical_fallback_hits(query, top_k=all_chunk_count, allowed_books=allowed_books)
         if semantic_hits:
             mixed_hits = _extend_with_fallback_hits(
                 semantic_hits,
@@ -740,7 +797,7 @@ def search_snippets():
         else:
             mixed_hits = fallback_hits
 
-        exact_hits = _exact_match_hits(query, top_k=all_chunk_count)
+        exact_hits = _exact_match_hits(query, top_k=all_chunk_count, allowed_books=allowed_books)
         if exact_hits:
             raw_hits = _extend_with_fallback_hits(
                 exact_hits,
@@ -790,6 +847,8 @@ def search_snippets():
         "has_next": page < total_pages,
         "match_mode": match_mode,
     }
+    if allowed_books is not None:
+        result["books_filter"] = sorted(allowed_books)
     if not snippets:
         result["message"] = "not_found"
     return jsonify(result)
@@ -802,20 +861,24 @@ def ask():
     question = service.preprocessor.normalize_query(question_raw)
     if not question:
         return jsonify({"detail": "question is required"}), 400
+    allowed_books, filter_error = _parse_books_filter(payload)
+    if filter_error:
+        return jsonify({"detail": filter_error}), 400
 
     core_terms = service.preprocessor.core_query_terms(question)
     meaningful_terms = service.preprocessor.meaningful_query_terms(question)
     if not core_terms or not meaningful_terms:
-        return jsonify(
-            {
-                "question": question_raw,
-                "normalized_question": question,
-                "answer": "Вопрос слишком общий. Уточните объект поиска: персонажа, событие или тему.",
-                "suggestions": _question_suggestions(question, meaningful_terms),
-                "sources": [],
-                "message": "clarify_needed",
-            }
-        )
+        response = {
+            "question": question_raw,
+            "normalized_question": question,
+            "answer": "Вопрос слишком общий. Уточните объект поиска: персонажа, событие или тему.",
+            "suggestions": _question_suggestions(question, meaningful_terms),
+            "sources": [],
+            "message": "clarify_needed",
+        }
+        if allowed_books is not None:
+            response["books_filter"] = sorted(allowed_books)
+        return jsonify(response)
     try:
         top_k = int(payload.get("top_k", settings.retrieval_top_k_default))
     except (TypeError, ValueError):
@@ -824,9 +887,9 @@ def ask():
     top_k = max(1, min(top_k, settings.retrieval_top_k_max))
     retrieve_k = max(top_k, min(settings.retrieval_top_k_max, top_k * 4))
     try:
-        hits = service.search_snippets(question, top_k=retrieve_k)
+        hits = service.search_snippets(question, top_k=retrieve_k, allowed_books=allowed_books)
         if not hits:
-            hits = _lexical_fallback_hits(question, top_k=retrieve_k)
+            hits = _lexical_fallback_hits(question, top_k=retrieve_k, allowed_books=allowed_books)
         source_hits = _filter_relevant_hits(question, hits, strict=True)
         if not source_hits:
             source_hits = _filter_relevant_hits(question, hits, strict=False)
@@ -851,6 +914,8 @@ def ask():
     ]
 
     response = {"question": question_raw, "normalized_question": question, "answer": result.answer, "sources": sources}
+    if allowed_books is not None:
+        response["books_filter"] = sorted(allowed_books)
     if result.message:
         response["message"] = result.message
         response["suggestions"] = _question_suggestions(question, meaningful_terms)

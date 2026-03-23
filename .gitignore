@@ -36,6 +36,9 @@ pip-wheel-metadata/
 *.log
 
 
+data/index.json
+index.json
+
 .tmp/
 .tmp_*/
 .tmp_pytest/

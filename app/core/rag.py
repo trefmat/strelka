@@ -117,8 +117,8 @@ class RagService:
         self.retriever.rebuild(self.store.all_chunks())
         return added
 
-    def search_snippets(self, query: str, top_k: int) -> list[RetrievalHit]:
-        return self.retriever.search(query=query, top_k=top_k)
+    def search_snippets(self, query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
+        return self.retriever.search(query=query, top_k=top_k, allowed_books=allowed_books)
 
     @staticmethod
     def _normalize_space(text: str) -> str:
@@ -578,8 +578,8 @@ class RagService:
                 answer = f"По найденным фрагментам: {', '.join(hints)}. {answer}"
         return AnswerResult(answer=answer, hits=hits)
 
-    def ask(self, question: str, top_k: int) -> AnswerResult:
-        hits = self.search_snippets(question, top_k=top_k)
+    def ask(self, question: str, top_k: int, *, allowed_books: set[str] | None = None) -> AnswerResult:
+        hits = self.search_snippets(question, top_k=top_k, allowed_books=allowed_books)
         return self.answer_from_hits(question, hits)
 
     def stats(self) -> tuple[int, int]:

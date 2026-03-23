@@ -159,7 +159,7 @@ class Retriever:
         compactness = min(1.0, need / best_span)
         return 0.6 * best_coverage + 0.4 * compactness
 
-    def search(self, query: str, top_k: int) -> list[RetrievalHit]:
+    def search(self, query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
         with self._lock:
             if not self._fitted:
                 return []
@@ -173,9 +173,14 @@ class Retriever:
 
             min_core_terms = 1 if len(core_terms) <= 2 else max(1, math.ceil(len(core_terms) * 0.5))
             query_norm = query.lower().replace("ё", "е").strip()
+            allowed = None if allowed_books is None else set(allowed_books)
 
             raw_scores: list[float] = []
             for i, chunk in enumerate(self._chunks):
+                if allowed is not None and chunk.book not in allowed:
+                    raw_scores.append(0.0)
+                    continue
+
                 core_score, core_matches = self._bm25_score(core_terms, i)
                 expanded_score, expanded_matches = self._bm25_score(expanded_terms, i)
                 exact_matches = sum(1 for t in exact_terms if t in self._doc_exact_set[i])
