@@ -27,6 +27,8 @@ _NON_NAME_CAPITALIZED = {
     "господин", "госпожа", "князь", "княгиня", "граф", "графиня", "барон", "баронесса",
     "генерал", "полковник", "капитан", "майор", "лейтенант", "доктор", "профессор",
     "император", "царь",
+    "мой", "моя", "мое", "мои", "твой", "твоя", "твое", "твои",
+    "ваш", "ваша", "ваше", "ваши", "вон", "да", "нет", "ну",
 }
 _WEAK_ANCHOR_TERMS = {
     "автор",
@@ -88,6 +90,32 @@ _OPPOSITE_MOTION_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _WHY_QUESTION_RE = re.compile(r"^(?:почему|зачем|отчего|по какой причине|из-?за чего)\b", re.IGNORECASE)
+_PERSON_QUESTION_RE = re.compile(
+    r"^(?:кто\b|у\s+кого\b|к\s+кого\b|чей\b|чья\b|чье\b|чьи\b)",
+    re.IGNORECASE,
+)
+_OWNERSHIP_QUESTION_RE = re.compile(
+    r"^(?:у\s+кого|к\s+кого)\b.*\b(был|была|было|были)\b",
+    re.IGNORECASE,
+)
+_WHO_QUESTION_RE = re.compile(r"^кто\b", re.IGNORECASE)
+_OWNER_BEFORE_BE_RE = re.compile(
+    r"\bу\s+([A-Za-zА-ЯЁа-яё-]+(?:\s+[A-Za-zА-ЯЁа-яё-]+){0,2})\s+был(?:а|о|и)?\b",
+    re.IGNORECASE,
+)
+_OWNER_AFTER_BE_RE = re.compile(
+    r"\bбыл(?:а|о|и)?\s+у\s+([A-Za-zА-ЯЁа-яё-]+(?:\s+[A-Za-zА-ЯЁа-яё-]+){0,2})\b",
+    re.IGNORECASE,
+)
+_OWNER_AFTER_BE_GAP_RE = re.compile(
+    r"\bбыл(?:а|о|и)?\b[^.!?\n]{0,80}\bу\s+([A-Za-zА-ЯЁа-яё-]+(?:\s+[A-Za-zА-ЯЁа-яё-]+){0,2})\b",
+    re.IGNORECASE,
+)
+_PERSON_ROLE_WORDS = {
+    "барин", "граф", "графиня", "князь", "княгиня", "доктор",
+    "полковник", "капитан", "майор", "лейтенант", "профессор",
+    "царь", "император", "король", "королева",
+}
 
 
 @dataclass(slots=True)
@@ -261,7 +289,17 @@ class RagService:
     @staticmethod
     def _question_expects_person(question: str) -> bool:
         q = " ".join(question.lower().replace("ё", "е").split())
-        return q == "кто" or q.startswith("кто ") or q.startswith("у кого ")
+        return bool(_PERSON_QUESTION_RE.match(q))
+
+    @staticmethod
+    def _question_is_ownership(question: str) -> bool:
+        q = " ".join(question.lower().replace("ё", "е").split())
+        return bool(_OWNERSHIP_QUESTION_RE.match(q))
+
+    @staticmethod
+    def _question_is_who(question: str) -> bool:
+        q = " ".join(question.lower().replace("ё", "е").split())
+        return bool(_WHO_QUESTION_RE.match(q))
 
     @staticmethod
     def _first_word(text: str) -> str:
@@ -275,6 +313,11 @@ class RagService:
     def _starts_with_pronoun(cls, sentence: str) -> bool:
         first = cls._first_word(sentence).lower().replace("ё", "е")
         return first in _PRONOUN_WORDS
+
+    @staticmethod
+    def _starts_with_person_role(sentence: str) -> bool:
+        first = "".join(ch for ch in sentence.strip().split(" ")[0] if ch.isalpha()).lower().replace("ё", "е")
+        return first in _PERSON_ROLE_WORDS
 
     @classmethod
     def _name_like_tokens(cls, sentence: str) -> list[str]:
@@ -310,6 +353,10 @@ class RagService:
         return bool(cls._name_like_tokens(sentence))
 
     @classmethod
+    def _has_person_mention(cls, sentence: str) -> bool:
+        return cls._has_name_like_token(sentence) or cls._starts_with_person_role(sentence)
+
+    @classmethod
     def _person_hints(cls, sentences: list[str], hits: list[RetrievalHit], *, limit: int = 4) -> list[str]:
         hints: list[str] = []
         seen: set[str] = set()
@@ -333,6 +380,152 @@ class RagService:
             if len(hints) >= limit:
                 return hints
         return hints
+
+    @staticmethod
+    def _extract_owner_name(sentence: str) -> str | None:
+        def clean_owner(raw: str) -> str | None:
+            candidate = " ".join(raw.split()).strip(" ,.;:!?\"'«»()[]{}")
+            if not candidate:
+                return None
+            words = [w for w in candidate.split() if w]
+            if not words:
+                return None
+            first_norm = words[0].lower().replace("ё", "е")
+            if first_norm in _PRONOUN_WORDS:
+                return None
+            return candidate
+
+        m = _OWNER_BEFORE_BE_RE.search(sentence)
+        if m:
+            owner = clean_owner(m.group(1))
+            if owner:
+                return owner
+        m = _OWNER_AFTER_BE_RE.search(sentence)
+        if m:
+            owner = clean_owner(m.group(1))
+            if owner:
+                return owner
+        m = _OWNER_AFTER_BE_GAP_RE.search(sentence)
+        if m:
+            owner = clean_owner(m.group(1))
+            if owner:
+                return owner
+        return None
+
+    @staticmethod
+    def _ownership_subject_and_verb(question: str) -> tuple[str | None, str]:
+        q = " ".join(question.strip().split())
+        m = re.search(r"\b(был|была|было|были)\b\s+(.+)$", q, re.IGNORECASE)
+        if not m:
+            return None, "был"
+        verb = m.group(1).lower().replace("ё", "е")
+        subject = m.group(2).strip(" \t\n\r?!.,;:«»\"'()[]{}")
+        subject = re.sub(r"^(?:ли|же)\s+", "", subject, flags=re.IGNORECASE).strip()
+        if not subject:
+            return None, verb
+        return subject.lower().replace("ё", "е"), verb
+
+    def _ownership_template_answer(
+        self,
+        question: str,
+        selected_sentences: list[str],
+        hits: list[RetrievalHit],
+        query_anchor: set[str],
+    ) -> str | None:
+        subject, verb = self._ownership_subject_and_verb(question)
+        if not subject:
+            return None
+
+        candidates: list[str] = []
+        candidates.extend(selected_sentences)
+        for hit in hits:
+            candidates.extend(self.preprocessor.split_sentences(hit.chunk.text))
+
+        seen: set[str] = set()
+        for sentence in candidates:
+            norm_sentence = " ".join(sentence.split())
+            if not norm_sentence:
+                continue
+            key = norm_sentence.lower().replace("ё", "е")
+            if key in seen:
+                continue
+            seen.add(key)
+            if query_anchor:
+                sentence_terms = set(self.preprocessor.tokenize(norm_sentence, include_synonyms=False))
+                if not (sentence_terms & query_anchor):
+                    continue
+            owner = self._extract_owner_name(norm_sentence)
+            if owner:
+                return f"По найденным фрагментам, {subject} {verb} у {owner}."
+        return None
+
+    def _who_template_answer(
+        self,
+        *,
+        selected_sentences: list[str],
+        hits: list[RetrievalHit],
+        query_anchor: set[str],
+    ) -> str | None:
+        candidates: list[str] = []
+        candidates.extend(selected_sentences)
+        for hit in hits:
+            candidates.extend(self.preprocessor.split_sentences(hit.chunk.text))
+
+        seen: set[str] = set()
+        for sentence in candidates:
+            normalized = self._normalize_answer_sentence(sentence)
+            if not normalized:
+                continue
+            key = normalized.lower().replace("ё", "е")
+            if key in seen:
+                continue
+            seen.add(key)
+
+            token_set = self._sentence_token_set(normalized)
+            if query_anchor and not (token_set & query_anchor):
+                continue
+            if self._is_fragmentary_sentence(normalized):
+                continue
+
+            cleaned = normalized.lstrip("—- ").strip()
+            if not cleaned:
+                continue
+            if self._starts_with_pronoun(cleaned):
+                continue
+            if not self._has_person_mention(cleaned):
+                continue
+            if cleaned[-1] not in ".!?…»\"'":
+                cleaned = cleaned.rstrip(",:;") + "."
+            return cleaned
+        return None
+
+    def _templated_answer(
+        self,
+        *,
+        question: str,
+        selected_sentences: list[str],
+        hits: list[RetrievalHit],
+        query_anchor: set[str],
+        expects_person: bool,
+    ) -> str | None:
+        if self._question_is_ownership(question):
+            ownership = self._ownership_template_answer(question, selected_sentences, hits, query_anchor)
+            if ownership:
+                return ownership
+
+        if expects_person and self._question_is_who(question):
+            who_answer = self._who_template_answer(
+                selected_sentences=selected_sentences,
+                hits=hits,
+                query_anchor=query_anchor,
+            )
+            if who_answer:
+                return who_answer
+
+            hints = self._person_hints(selected_sentences, hits, limit=4)
+            if hints:
+                return f"По найденным фрагментам: {', '.join(hints)}."
+        return None
 
     @staticmethod
     def _low_confidence_result(hits: list[RetrievalHit]) -> AnswerResult:
@@ -381,6 +574,7 @@ class RagService:
             query_exact = set(raw_query_exact)
         query_speech = self.preprocessor.speech_query_terms(question)
         expects_person = self._question_expects_person(question)
+        is_ownership_question = self._question_is_ownership(question)
         is_why_question = self._question_is_why(question)
         is_weak_anchor_query = bool(query_anchor) and all(self._is_weak_anchor_term(term) for term in query_anchor)
         refusal_terms = {term for term in query_anchor if self._is_refusal_term(term)}
@@ -450,9 +644,20 @@ class RagService:
                 fragment_penalty = 0.11 if self._is_fragmentary_sentence(normalized) else 0.0
                 person_bonus = 0.0
                 if expects_person and self._has_name_like_token(normalized):
-                    person_bonus += 0.08
+                    person_bonus += 0.15
+                    if anchor_overlap > 0:
+                        person_bonus += 0.06
+                if expects_person and not self._has_name_like_token(normalized):
+                    person_bonus -= 0.12
                 if expects_person and self._starts_with_pronoun(normalized):
-                    person_bonus -= 0.07
+                    person_bonus -= 0.11
+                ownership_bonus = 0.0
+                if is_ownership_question and anchor_overlap > 0:
+                    owner_name = self._extract_owner_name(normalized)
+                    if owner_name:
+                        ownership_bonus += 0.24
+                    else:
+                        ownership_bonus -= 0.08
                 causal_bonus = 0.0
                 if is_why_question and has_causal_cue:
                     causal_bonus += 0.18
@@ -470,6 +675,7 @@ class RagService:
                     + 0.14 * support_score
                     + 0.06 * speech_coverage
                     + person_bonus
+                    + ownership_bonus
                     + causal_bonus
                     - fragment_penalty
                     - echo_penalty
@@ -592,13 +798,25 @@ class RagService:
         if not best:
             return self._low_confidence_result(hits)
 
-        answer = self._truncate_answer(best, max_chars=680)
+        templated = self._templated_answer(
+            question=question,
+            selected_sentences=best,
+            hits=hits,
+            query_anchor=query_anchor,
+            expects_person=expects_person,
+        )
+        answer = templated if templated else self._truncate_answer(best, max_chars=680)
         if not answer:
             return self._low_confidence_result(hits)
 
-        if expects_person and (self._starts_with_pronoun(answer) or not self._has_name_like_token(answer)):
+        if expects_person:
             hints = self._person_hints(best, hits, limit=4)
-            if hints:
+            answer_norm = answer.lower().replace("ё", "е")
+            has_hint_in_answer = any(
+                hint.lower().replace("ё", "е") in answer_norm
+                for hint in hints
+            )
+            if hints and ((self._starts_with_pronoun(answer) or not self._has_name_like_token(answer)) or not has_hint_in_answer):
                 answer = f"По найденным фрагментам: {', '.join(hints)}. {answer}"
 
         return AnswerResult(answer=answer, hits=hits)

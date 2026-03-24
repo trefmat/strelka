@@ -1353,13 +1353,16 @@ def ask():
         if not source_hits:
             loose_hits = _filter_relevant_hits(question, hits, strict=False)
             source_hits = [h for h in loose_hits if _hit_has_direct_support(question, h)]
-        source_hits = _dedupe_hits(source_hits, top_k)
-        result = service.answer_from_hits(question, source_hits)
+        answer_limit = top_k
+        if service._question_is_ownership(question):
+            answer_limit = max(top_k, min(retrieve_k, top_k * 3))
+        answer_hits = _dedupe_hits(source_hits, answer_limit)
+        result = service.answer_from_hits(question, answer_hits)
     except Exception as exc:
         app.logger.exception("ask failed")
         return jsonify({"detail": f"ask failed: {type(exc).__name__}"}), 500
 
-    source_hits = result.hits
+    source_hits = _dedupe_hits(result.hits, top_k)
 
     source_cache: dict[str, str] = {}
     sources = []
