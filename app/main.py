@@ -870,7 +870,10 @@ def _read_stored_book_text(book: str) -> tuple[str | None, str | None]:
     path = service.store.books_dir / name
     if not path.exists() or not path.is_file():
         return None, f"book not found: {name}"
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return None, f"failed to read book: {name} ({exc})"
     decoded = _decode_text_bytes(raw)
     if decoded is None:
         return None, f"failed to decode book: {name}"

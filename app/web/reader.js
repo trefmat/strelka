@@ -58,21 +58,40 @@ async function loadReader() {
   meta.textContent = `Переход к позиции ${start}-${end}`;
   textBox.textContent = 'Обработка...';
 
-  const res = await fetch(`/books/content?book=${encodeURIComponent(book)}`);
-  if (!res.ok) {
-    let detail = 'Не удалось открыть книгу';
-    try {
-      const data = await res.json();
-      detail = data.detail || detail;
-    } catch (e) {
+  try {
+    const res = await fetch(`/books/content?book=${encodeURIComponent(book)}`);
+    if (!res.ok) {
+      let detail = 'Не удалось открыть книгу';
+      const body = await res.text();
+      if (body) {
+        try {
+          const data = JSON.parse(body);
+          detail = data.detail || detail;
+        } catch (e) {
+          const stripped = body
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (stripped) {
+            detail = `${detail} (HTTP ${res.status}): ${stripped.slice(0, 240)}`;
+          } else {
+            detail = `${detail} (HTTP ${res.status})`;
+          }
+        }
+      } else {
+        detail = `${detail} (HTTP ${res.status})`;
+      }
+      textBox.textContent = detail;
+      return;
     }
-    textBox.textContent = detail;
-    return;
-  }
 
-  const text = await res.text();
-  setTextNodeRange(textBox, text, start, end);
-  meta.textContent = `Длина книги: ${text.length} символов`;
+    const text = await res.text();
+    setTextNodeRange(textBox, text, start, end);
+    meta.textContent = `Длина книги: ${text.length} символов`;
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : 'network error';
+    textBox.textContent = `Не удалось открыть книгу: ${msg}`;
+  }
 }
 
 document.getElementById('readerBackBtn').addEventListener('click', () => {
