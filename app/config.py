@@ -12,7 +12,7 @@ class Settings:
     books_dir: Path = Path(os.getenv("BOOKS_DIR", "data/books"))
     index_file: Path = Path(os.getenv("INDEX_FILE", "data/index.json"))
     retrieval_top_k_default: int = int(os.getenv("RETRIEVAL_TOP_K_DEFAULT", "5"))
-    retrieval_top_k_max: int = int(os.getenv("RETRIEVAL_TOP_K_MAX", "10"))
+    retrieval_top_k_max: int = int(os.getenv("RETRIEVAL_TOP_K_MAX", "30"))
     search_page_size_default: int = int(os.getenv("SEARCH_PAGE_SIZE_DEFAULT", "5"))
     search_page_size_max: int = int(os.getenv("SEARCH_PAGE_SIZE_MAX", "50"))
     min_search_score: float = float(os.getenv("MIN_SEARCH_SCORE", "0.05"))

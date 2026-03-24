@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import math
+import re
 import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -159,6 +160,18 @@ class Retriever:
         compactness = min(1.0, need / best_span)
         return 0.6 * best_coverage + 0.4 * compactness
 
+    @staticmethod
+    def _contains_query_phrase(text_norm: str, query_norm: str, *, whole_word: bool) -> bool:
+        if not query_norm:
+            return False
+        if not whole_word:
+            return query_norm in text_norm
+        pattern = re.compile(
+            rf"(?<![A-Za-zА-Яа-яЁё0-9\[\]]){re.escape(query_norm)}(?![A-Za-zА-Яа-яЁё0-9\[\]])",
+            re.IGNORECASE,
+        )
+        return bool(pattern.search(text_norm))
+
     def search(self, query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
         with self._lock:
             if not self._fitted:
@@ -173,6 +186,7 @@ class Retriever:
 
             min_core_terms = 1 if len(core_terms) <= 2 else max(1, math.ceil(len(core_terms) * 0.5))
             query_norm = query.lower().replace("ё", "е").strip()
+            short_single_exact_query = len(exact_terms) == 1 and len(exact_terms[0]) <= 4
             allowed = None if allowed_books is None else set(allowed_books)
 
             raw_scores: list[float] = []
@@ -208,7 +222,7 @@ class Retriever:
                 adjusted += 0.16 * exact_ratio
 
                 text_norm = chunk.text.lower().replace("ё", "е")
-                if query_norm and query_norm in text_norm:
+                if self._contains_query_phrase(text_norm, query_norm, whole_word=short_single_exact_query):
                     adjusted += 0.18
 
                 if core_matches > 0 and len(core_terms) > 1:
@@ -253,6 +267,7 @@ class Retriever:
         q_core_tf = Counter(query_core_terms)
         q_expanded_tf = Counter(query_expanded_terms)
         query_norm = query.lower().replace("ё", "е").strip()
+        short_single_exact_query = len(query_exact_terms) == 1 and len(query_exact_terms[0]) <= 4
 
         scored: list[tuple[str, float]] = []
         for sentence in sentences:
@@ -269,7 +284,12 @@ class Retriever:
             if query_exact_terms:
                 exact_overlap = len(sentence_exact & query_exact_set) / len(query_exact_terms)
 
-            phrase_bonus = 0.08 if query_norm and query_norm in sentence.lower().replace("ё", "е") else 0.0
+            sentence_norm = sentence.lower().replace("ё", "е")
+            phrase_bonus = 0.08 if self._contains_query_phrase(
+                sentence_norm,
+                query_norm,
+                whole_word=short_single_exact_query,
+            ) else 0.0
             if len(query_core_terms) == 1:
                 score = 0.48 * core_cos + 0.42 * expanded_cos + 0.10 * exact_overlap + phrase_bonus
             else:

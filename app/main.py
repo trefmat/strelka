@@ -86,7 +86,7 @@ _WEAK_QUERY_PREFIXES = (
     "отмеча",
 )
 _SUPPORTED_UPLOAD_EXTENSIONS = {".txt", ".fb2", ".epub"}
-_MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+_MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 
 app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
 
@@ -150,7 +150,9 @@ def _whole_word_match_count(text: str, tokens: list[str]) -> int:
     for token in sorted(set(tokens), key=len, reverse=True):
         if len(token) < 2:
             continue
-        pattern = re.compile(rf"(?<![A-Za-zА-Яа-яЁё0-9]){re.escape(token)}(?![A-Za-zА-Яа-яЁё0-9])")
+        pattern = re.compile(
+            rf"(?<![A-Za-zА-Яа-яЁё0-9\[\]]){re.escape(token)}(?![A-Za-zА-Яа-яЁё0-9\[\]])"
+        )
         total += len(pattern.findall(text_norm))
     return total
 
@@ -167,127 +169,169 @@ def _is_sentence_fragment(sentence: str) -> bool:
     return False
 
 
-def _focus_quote(chunk, query: str, size: int = 420, *, book_text: str | None = None) -> tuple[str, int, int]:
-    text = chunk.text
-    exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
-    query_terms = [t for t in service.preprocessor.tokenize(query) if not service.preprocessor.is_morph_token(t)]
-    size = max(120, int(size))
+def _best_sentence_signal(
+    *,
+    sentences: list[str],
+    sentence_scores: list[tuple[str, float]],
+    exact_tokens: list[str],
+    anchor_terms: set[str],
+    expanded_anchor_terms_non_morph: set[str],
+) -> tuple[float, float]:
+    if not sentences:
+        return 0.0, 0.0
 
-    def find_anchor_span(haystack: str, tokens: list[str]) -> tuple[int, int] | None:
-        for token in sorted(set(tokens), key=len, reverse=True):
-            if len(token) < 2:
-                continue
+    score_map = {s: sc for s, sc in sentence_scores}
+    best_signal = 0.0
+    best_semantic = 0.0
+
+    for sentence in sentences:
+        if not sentence.strip():
+            continue
+        if _is_sentence_fragment(sentence):
+            continue
+
+        sentence_terms = set(service.preprocessor.tokenize(sentence, include_synonyms=False))
+        sentence_exact = _whole_word_match_count(sentence, exact_tokens)
+        sentence_anchor_overlap = len(sentence_terms & anchor_terms) if anchor_terms else 0
+        sentence_expanded_overlap = (
+            len(sentence_terms & expanded_anchor_terms_non_morph) if expanded_anchor_terms_non_morph else 0
+        )
+
+        support = 0.0
+        if exact_tokens:
+            support = max(support, sentence_exact / max(1, len(exact_tokens)))
+        if anchor_terms:
+            support = max(support, sentence_anchor_overlap / max(1, len(anchor_terms)))
+        if expanded_anchor_terms_non_morph:
+            support = max(support, sentence_expanded_overlap / max(1, len(expanded_anchor_terms_non_morph)))
+
+        semantic = score_map.get(sentence, 0.0)
+        if support == 0.0 and semantic < 0.20:
+            continue
+
+        signal = 0.60 * semantic + 0.40 * support
+        if signal > best_signal:
+            best_signal = signal
+            best_semantic = semantic
+
+    return best_signal, best_semantic
+
+
+def _focus_quote(chunk, query: str, size: int = 420, *, book_text: str | None = None) -> tuple[str, int, int]:
+    text = chunk.text or ""
+    size = max(120, int(size))
+    query_norm = " ".join(query.lower().replace("ё", "е").split())
+    exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
+    core_terms = service.preprocessor.core_query_terms(query)
+    expanded_terms = {
+        t for t in service.preprocessor.tokenize(query) if not service.preprocessor.is_morph_token(t)
+    }
+
+    def find_phrase_span(haystack: str, phrase_norm: str) -> tuple[int, int] | None:
+        if len(phrase_norm) < 3:
+            return None
+        lower = haystack.lower().replace("ё", "е")
+        if " " not in phrase_norm:
             pattern = re.compile(
-                rf"(?<![A-Za-zА-Яа-яЁё0-9])({re.escape(token)})(?![A-Za-zА-Яа-яЁё0-9])",
+                rf"(?<![A-Za-zА-Яа-яЁё0-9\[\]])({re.escape(phrase_norm)})(?![A-Za-zА-Яа-яЁё0-9\[\]])",
                 re.IGNORECASE,
             )
-            match = pattern.search(haystack)
-            if match:
-                return match.span(1)
-        return None
+            match = pattern.search(lower)
+            if not match:
+                return None
+            return match.span(1)
 
-    def find_phrase_span(haystack: str, phrase: str) -> tuple[int, int] | None:
-        probe = " ".join(phrase.lower().split())
-        if len(probe) < 3:
-            return None
-        lower = haystack.lower()
-        pos = lower.find(probe)
+        pos = lower.find(phrase_norm)
         if pos < 0:
             return None
-        return pos, pos + len(probe)
+        return pos, pos + len(phrase_norm)
 
-    def nearest_literal_span(haystack: str, needle: str, expected_start: int, window: int = 5000) -> tuple[int, int] | None:
-        if not needle:
+    def find_stem_span(haystack: str, stems: set[str], start: int = 0, end: int | None = None) -> tuple[int, int] | None:
+        if not stems:
             return None
-        ws = max(0, expected_start - window)
-        we = min(len(haystack), expected_start + window + len(needle))
-        probe = haystack[ws:we]
-        idx = probe.find(needle)
-        if idx < 0:
+        slice_end = len(haystack) if end is None else min(len(haystack), end)
+        if start < 0:
+            start = 0
+        if start >= slice_end:
             return None
-        best_start = ws + idx
-        best_dist = abs(best_start - expected_start)
-        cursor = idx + 1
-        while True:
-            nxt = probe.find(needle, cursor)
-            if nxt < 0:
-                break
-            abs_pos = ws + nxt
-            dist = abs(abs_pos - expected_start)
-            if dist < best_dist:
-                best_dist = dist
-                best_start = abs_pos
-                if dist == 0:
-                    break
-            cursor = nxt + 1
-        return best_start, best_start + len(needle)
+        for match in re.finditer(r"[A-Za-zА-Яа-яЁё0-9]+", haystack[start:slice_end]):
+            token = match.group(0)
+            stem = service.preprocessor._stem(service.preprocessor._normalize_token(token))
+            if stem in stems:
+                abs_start = start + match.start(0)
+                abs_end = start + match.end(0)
+                return abs_start, abs_end
+        return None
 
-    base_text = book_text
-    if base_text is None:
-        loaded_text, _ = _read_stored_book_text(chunk.book)
-        base_text = loaded_text
-    if not base_text:
-        base_text = text
+    anchor_local: tuple[int, int] | None = find_phrase_span(text, query_norm)
+    if anchor_local is None:
+        sentences = service.preprocessor.split_sentences(text)
+        sentence_scores = dict(service.retriever.sentence_scores(query, sentences))
+        best_sentence_span: tuple[int, int] | None = None
+        best_support = float("-inf")
+        cursor = 0
+        for sentence in sentences:
+            if not sentence:
+                continue
+            idx = text.find(sentence, cursor)
+            if idx < 0:
+                idx = text.find(sentence)
+            if idx < 0:
+                continue
+            cursor = idx + len(sentence)
+            sent_terms = set(service.preprocessor.tokenize(sentence, include_synonyms=False))
+            exact_count = _whole_word_match_count(sentence, exact_tokens)
+            core_overlap = len(core_terms & sent_terms) if core_terms else 0
+            expanded_overlap = len(expanded_terms & sent_terms) if expanded_terms else 0
+            semantic = sentence_scores.get(sentence, 0.0)
+            support = (
+                1.25 * exact_count
+                + 0.90 * core_overlap
+                + 0.30 * expanded_overlap
+                + 0.55 * semantic
+            )
+            if support > best_support:
+                best_support = support
+                best_sentence_span = (idx, idx + len(sentence))
 
-    chunk_start = max(0, min(int(chunk.offset_start), len(base_text)))
-    chunk_end = max(chunk_start, min(int(chunk.offset_end), len(base_text)))
-    if chunk_end <= chunk_start:
-        chunk_start = 0
-        chunk_end = len(base_text)
+        if best_sentence_span is not None:
+            anchor_local = (
+                find_stem_span(text, core_terms, start=best_sentence_span[0], end=best_sentence_span[1])
+                or find_stem_span(text, expanded_terms, start=best_sentence_span[0], end=best_sentence_span[1])
+                or best_sentence_span
+            )
 
-    chunk_text = base_text[chunk_start:chunk_end]
-    if not chunk_text:
-        chunk_text = text
+    if anchor_local is None:
+        mid = max(0, len(text) // 2)
+        anchor_local = (mid, min(len(text), mid + 1))
 
-    anchor_local = (
-        find_phrase_span(chunk_text, query)
-        or find_anchor_span(chunk_text, exact_tokens)
-        or find_anchor_span(chunk_text, query_terms)
-    )
-    if anchor_local:
-        expected_start = chunk_start + anchor_local[0]
-        expected_end = chunk_start + anchor_local[1]
-        anchor_piece = chunk_text[anchor_local[0]:anchor_local[1]]
-        remap = nearest_literal_span(base_text, anchor_piece, expected_start)
-        if remap:
-            anchor_start, anchor_end = remap
-        else:
-            anchor_start, anchor_end = expected_start, expected_end
-    else:
-        local_in_original = (
-            find_phrase_span(text, query)
-            or find_anchor_span(text, exact_tokens)
-            or find_anchor_span(text, query_terms)
-        )
-        if local_in_original:
-            anchor_start = chunk_start + local_in_original[0]
-            anchor_end = chunk_start + local_in_original[1]
-        else:
-            anchor_start = chunk_start + max(0, len(chunk_text) // 2)
-            anchor_end = min(len(base_text), anchor_start + 1)
-
-    center = (anchor_start + anchor_end) // 2
+    anchor_start_local, anchor_end_local = anchor_local
+    center = (anchor_start_local + anchor_end_local) // 2
     half = size // 2
-    start = max(0, center - half)
-    end = min(len(base_text), start + size)
-    start = max(0, end - size)
+    start_local = max(0, center - half)
+    end_local = min(len(text), start_local + size)
+    start_local = max(0, end_local - size)
 
-    core = base_text[start:end]
-    mark_start = max(anchor_start, start)
-    mark_end = min(anchor_end, end)
-    if mark_end > mark_start:
-        rel_s = mark_start - start
-        rel_e = mark_end - start
+    core = text[start_local:end_local]
+    mark_start = max(anchor_start_local, start_local)
+    mark_end = min(anchor_end_local, end_local)
+    if (mark_end - mark_start) >= 2:
+        rel_s = mark_start - start_local
+        rel_e = mark_end - start_local
         core = core[:rel_s] + "[[" + core[rel_s:rel_e] + "]]" + core[rel_e:]
 
     snippet = core.strip()
-    if start > 0:
+    if start_local > 0:
         snippet = "... " + snippet
-    if end < len(base_text):
+    if end_local < len(text):
         snippet = snippet + " ..."
     if not snippet:
         snippet = _clip(text, size=size)
-    return snippet, anchor_start, max(anchor_start + 1, anchor_end)
+
+    focus_start = max(chunk.offset_start, chunk.offset_start + anchor_start_local)
+    focus_end = max(focus_start + 1, chunk.offset_start + anchor_end_local)
+    focus_end = min(focus_end, max(chunk.offset_end, focus_start + 1))
+    return snippet, focus_start, focus_end
 
 
 def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool = False) -> list[RetrievalHit]:
@@ -325,8 +369,9 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
     anchor_query_text = " ".join(sorted(anchor_terms))
     expanded_anchor_terms = set(service.preprocessor.tokenize(anchor_query_text)) if anchor_query_text else set()
     expanded_anchor_terms_non_morph = {t for t in expanded_anchor_terms if not service.preprocessor.is_morph_token(t)}
+    short_single_anchor_query = _is_short_single_anchor_query(anchor_terms)
 
-    scored: list[tuple[RetrievalHit, int, int, float, int]] = []
+    scored: list[tuple[RetrievalHit, int, int, float, int, float, float]] = []
     for hit in hits:
         chunk_terms = set(service.preprocessor.tokenize(hit.chunk.text, include_synonyms=False))
         literal_exact_count = _whole_word_match_count(hit.chunk.text, exact_tokens)
@@ -344,11 +389,28 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
             len(expanded_anchor_terms_non_morph & chunk_terms) if expanded_anchor_terms_non_morph else 0
         )
 
+        if short_single_anchor_query and exact_count == 0 and anchor_overlap == 0 and expanded_anchor_overlap_non_morph == 0:
+            continue
+
         sentences = service.preprocessor.split_sentences(hit.chunk.text)
         sentence_scores = service.retriever.sentence_scores(query, sentences)
         best_sentence_score = sentence_scores[0][1] if sentence_scores else 0.0
+        best_sentence_signal, _ = _best_sentence_signal(
+            sentences=sentences,
+            sentence_scores=sentence_scores,
+            exact_tokens=exact_tokens,
+            anchor_terms=anchor_terms,
+            expanded_anchor_terms_non_morph=expanded_anchor_terms_non_morph,
+        )
+        if (
+            short_single_anchor_query
+            and exact_count == 0
+            and expanded_anchor_overlap_non_morph == 0
+            and best_sentence_signal < 0.40
+        ):
+            continue
 
-        if exact_count == 0 and anchor_overlap == 0 and best_sentence_score < 0.18:
+        if exact_count == 0 and anchor_overlap == 0 and best_sentence_score < 0.18 and best_sentence_signal < 0.18:
             continue
         if len(anchor_terms) == 1 and len(exact_tokens) <= 1 and morph_only_exact and anchor_overlap == 0:
             has_non_fragment_signal = False
@@ -386,8 +448,10 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
         ):
                                                                               
                                                           
-            continue
+                continue
         if len(anchor_terms) >= 2 and anchor_overlap == 0 and exact_count == 0 and best_sentence_score < 0.24:
+            continue
+        if strict and len(anchor_terms) >= 2 and exact_count == 0 and best_sentence_signal < 0.26 and best_sentence_score < 0.30:
             continue
         if strict and anchor_terms and anchor_overlap == 0 and expanded_anchor_overlap_non_morph == 0 and exact_count == 0:
             continue
@@ -421,16 +485,26 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
         if negation_penalty > 0 and len(anchor_terms) >= 2 and best_sentence_score < 0.78:
             continue
         rerank_score = (
-            0.46 * hit.score
-            + 0.29 * best_sentence_score
-            + 0.17 * coverage
-            + 0.08 * exact_ratio
+            0.38 * hit.score
+            + 0.22 * best_sentence_score
+            + 0.20 * best_sentence_signal
+            + 0.14 * coverage
+            + 0.06 * exact_ratio
             + phrase_bonus
         )
         if speech_query_terms:
             rerank_score += 0.05 * speech_coverage
             if strict and speech_overlap == 0 and best_sentence_score < 0.34:
                 rerank_score *= 0.82
+
+        signal_density = (
+            (exact_count + anchor_overlap + expanded_anchor_overlap_non_morph)
+            / max(8.0, float(len(chunk_terms)))
+        )
+        if signal_density < 0.030 and best_sentence_signal < 0.32:
+            rerank_score *= 0.84
+        if signal_density < 0.022 and best_sentence_signal < 0.28 and exact_count == 0 and coverage < 0.25:
+            rerank_score *= 0.82
 
         if anchor_overlap == 0 and exact_count == 0:
             rerank_score *= 0.82
@@ -449,6 +523,8 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
                 anchor_overlap,
                 best_sentence_score,
                 expanded_anchor_overlap_non_morph,
+                best_sentence_signal,
+                signal_density,
             )
         )
 
@@ -456,16 +532,21 @@ def _filter_relevant_hits(query: str, hits: list[RetrievalHit], *, strict: bool 
         return []
 
                                                                                          
-    if any(exact > 0 for _, exact, _, _, _ in scored):
+    if any(exact > 0 for _, exact, _, _, _, _, _ in scored):
         if len(anchor_terms) == 1 and len(exact_tokens) == 1:
                                                                                         
                                                             
             semantic_floor = 0.36 if strict else 0.33
-            scored = [item for item in scored if item[1] > 0 or item[4] > 0 or item[3] >= semantic_floor]
+            scored = [item for item in scored if item[1] > 0 or item[4] > 0 or item[5] >= semantic_floor]
         else:
-            scored = [item for item in scored if item[1] > 0 or item[3] >= 0.32]
+            scored = [item for item in scored if item[1] > 0 or item[3] >= 0.32 or item[5] >= 0.30]
 
-    scored.sort(key=lambda item: (item[0].score, item[1], item[2], item[3], item[4]), reverse=True)
+    scored.sort(key=lambda item: (item[0].score, item[5], item[1], item[2], item[3], item[4]), reverse=True)
+
+    if short_single_anchor_query:
+        scored = [item for item in scored if item[1] > 0 or item[4] > 0 or item[5] >= 0.45]
+        if not scored:
+            return []
 
     best_score = scored[0][0].score
     if len(anchor_terms) >= 2:
@@ -557,7 +638,12 @@ def _extend_with_fallback_hits(
 def _lexical_fallback_hits(query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
     exact_tokens = service.preprocessor.meaningful_exact_tokens(query)
     core_terms = service.preprocessor.core_query_terms(query)
+    meaningful_terms = service.preprocessor.meaningful_query_terms(query)
+    anchor_terms = _effective_anchor_terms(meaningful_terms, core_terms)
     expanded_terms = set(service.preprocessor.tokenize(query))
+    anchor_query_text = " ".join(sorted(anchor_terms))
+    expanded_anchor_terms = set(service.preprocessor.tokenize(anchor_query_text)) if anchor_query_text else set()
+    expanded_anchor_terms_non_morph = {t for t in expanded_anchor_terms if not service.preprocessor.is_morph_token(t)}
     if not exact_tokens and not core_terms and not expanded_terms:
         return []
 
@@ -571,11 +657,30 @@ def _lexical_fallback_hits(query: str, top_k: int, *, allowed_books: set[str] | 
         chunk_terms = set(service.preprocessor.tokenize(chunk.text, include_synonyms=False))
         core_overlap = len(core_terms & chunk_terms) if core_terms else 0
         expanded_overlap = len(expanded_terms & chunk_terms) if expanded_terms else 0
-        if exact_count == 0 and core_overlap == 0 and expanded_overlap == 0:
+        sentences = service.preprocessor.split_sentences(chunk.text)
+        sentence_scores = service.retriever.sentence_scores(query, sentences)
+        best_sentence_signal, _ = _best_sentence_signal(
+            sentences=sentences,
+            sentence_scores=sentence_scores,
+            exact_tokens=exact_tokens,
+            anchor_terms=anchor_terms,
+            expanded_anchor_terms_non_morph=expanded_anchor_terms_non_morph,
+        )
+
+        if exact_count == 0 and core_overlap == 0 and expanded_overlap == 0 and best_sentence_signal < 0.18:
             continue
 
         phrase_bonus = 0.20 if query_norm and query_norm in chunk.text.lower().replace("ё", "е") else 0.0
-        raw_score = exact_count * 1.00 + core_overlap * 0.45 + expanded_overlap * 0.30 + phrase_bonus
+        raw_score = (
+            exact_count * 1.00
+            + core_overlap * 0.42
+            + expanded_overlap * 0.24
+            + best_sentence_signal * 0.95
+            + phrase_bonus
+        )
+        signal_density = (exact_count + core_overlap + expanded_overlap) / max(8.0, float(len(chunk_terms)))
+        if signal_density < 0.025 and best_sentence_signal < 0.30:
+            raw_score *= 0.84
         candidates.append((raw_score, RetrievalHit(chunk=chunk, score=raw_score)))
 
     if not candidates:
@@ -594,6 +699,12 @@ def _exact_match_hits(query: str, top_k: int, *, allowed_books: set[str] | None 
     if not exact_tokens:
         return []
 
+    core_terms = service.preprocessor.core_query_terms(query)
+    meaningful_terms = service.preprocessor.meaningful_query_terms(query)
+    anchor_terms = _effective_anchor_terms(meaningful_terms, core_terms)
+    anchor_query_text = " ".join(sorted(anchor_terms))
+    expanded_anchor_terms = set(service.preprocessor.tokenize(anchor_query_text)) if anchor_query_text else set()
+    expanded_anchor_terms_non_morph = {t for t in expanded_anchor_terms if not service.preprocessor.is_morph_token(t)}
     query_norm = query.lower().replace("ё", "е").strip()
     candidates: list[tuple[float, RetrievalHit]] = []
 
@@ -604,8 +715,17 @@ def _exact_match_hits(query: str, top_k: int, *, allowed_books: set[str] | None 
         if exact_count <= 0:
             continue
 
+        sentences = service.preprocessor.split_sentences(chunk.text)
+        sentence_scores = service.retriever.sentence_scores(query, sentences)
+        best_sentence_signal, _ = _best_sentence_signal(
+            sentences=sentences,
+            sentence_scores=sentence_scores,
+            exact_tokens=exact_tokens,
+            anchor_terms=anchor_terms,
+            expanded_anchor_terms_non_morph=expanded_anchor_terms_non_morph,
+        )
         phrase_bonus = 0.15 if query_norm and query_norm in chunk.text.lower().replace("ё", "е") else 0.0
-        raw_score = exact_count + phrase_bonus
+        raw_score = exact_count + (0.75 * best_sentence_signal) + phrase_bonus
         candidates.append((raw_score, RetrievalHit(chunk=chunk, score=raw_score)))
 
     if not candidates:
@@ -629,6 +749,13 @@ def _effective_anchor_terms(meaningful_terms: set[str], core_terms: set[str]) ->
         return set()
     strong_terms = {term for term in anchor_terms if not _is_weak_query_term(term)}
     return strong_terms if strong_terms else anchor_terms
+
+
+def _is_short_single_anchor_query(anchor_terms: set[str]) -> bool:
+    if len(anchor_terms) != 1:
+        return False
+    term = next(iter(anchor_terms))
+    return len(term) <= 4
 
 
 def _book_chunk_counts() -> Counter[str]:
@@ -1082,20 +1209,24 @@ def search_snippets():
     page = max(1, page)
     page_size = max(1, min(page_size, settings.search_page_size_max))
 
-    all_chunks = service.store.all_chunks()
-    if allowed_books is None:
-        scoped_chunk_count = len(all_chunks)
-    else:
-        scoped_chunk_count = sum(1 for chunk in all_chunks if chunk.book in allowed_books)
-    all_chunk_count = max(1, scoped_chunk_count)
+    candidate_limit = min(
+        max(page_size * 10, settings.retrieval_top_k_max * 4, 24),
+        max(24, settings.retrieval_top_k_max * 8),
+    )
 
     try:
-        semantic_hits = service.search_snippets(
-            query,
-            top_k=settings.retrieval_top_k_max,
-            allowed_books=allowed_books,
-        )
-        fallback_hits = _lexical_fallback_hits(query, top_k=all_chunk_count, allowed_books=allowed_books)
+        if allowed_books is None:
+            semantic_hits = service.search_snippets(
+                query,
+                top_k=settings.retrieval_top_k_max,
+            )
+        else:
+            semantic_hits = service.search_snippets(
+                query,
+                top_k=settings.retrieval_top_k_max,
+                allowed_books=allowed_books,
+            )
+        fallback_hits = _lexical_fallback_hits(query, top_k=candidate_limit, allowed_books=allowed_books)
         if semantic_hits:
             mixed_hits = _extend_with_fallback_hits(
                 semantic_hits,
@@ -1105,7 +1236,7 @@ def search_snippets():
         else:
             mixed_hits = fallback_hits
 
-        exact_hits = _exact_match_hits(query, top_k=all_chunk_count, allowed_books=allowed_books)
+        exact_hits = _exact_match_hits(query, top_k=candidate_limit, allowed_books=allowed_books)
         if exact_hits:
             raw_hits = _extend_with_fallback_hits(
                 exact_hits,
@@ -1212,7 +1343,10 @@ def ask():
     top_k = max(1, min(top_k, settings.retrieval_top_k_max))
     retrieve_k = max(top_k, min(settings.retrieval_top_k_max, top_k * 4))
     try:
-        hits = service.search_snippets(question, top_k=retrieve_k, allowed_books=allowed_books)
+        if allowed_books is None:
+            hits = service.search_snippets(question, top_k=retrieve_k)
+        else:
+            hits = service.search_snippets(question, top_k=retrieve_k, allowed_books=allowed_books)
         if not hits:
             hits = _lexical_fallback_hits(question, top_k=retrieve_k, allowed_books=allowed_books)
         source_hits = _filter_relevant_hits(question, hits, strict=True)

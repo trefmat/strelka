@@ -18,7 +18,7 @@ WEB_BASE_URL = os.getenv("WEB_BASE_URL", BASE_URL).rstrip("/")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 API_TIMEOUT = 30
 TG_MESSAGE_LIMIT = 3800
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 
 logger = logging.getLogger(__name__)
 _CHAT_BOOK_FILTERS: dict[int, set[str]] = {}

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 
 from app.config import settings
+from app.core.chunk_search import ChunkSearchEngine
 from app.core.preprocess import TextPreprocessor
 from app.core.retrieve import RetrievalHit, Retriever
 from app.core.store import BookStore
@@ -114,16 +115,21 @@ class RagService:
     def __init__(self) -> None:
         self.preprocessor = TextPreprocessor()
         self.store = BookStore()
+        self.chunk_search = ChunkSearchEngine(self.preprocessor)
         self.retriever = Retriever(self.preprocessor)
-        self.retriever.rebuild(self.store.all_chunks())
+        chunks = self.store.all_chunks()
+        self.chunk_search.rebuild(chunks)
+        self.retriever.rebuild(chunks)
 
     def upload_book(self, filename: str, content: str) -> int:
         added = self.store.add_book(filename, content)
-        self.retriever.rebuild(self.store.all_chunks())
+        chunks = self.store.all_chunks()
+        self.chunk_search.rebuild(chunks)
+        self.retriever.rebuild(chunks)
         return added
 
     def search_snippets(self, query: str, top_k: int, *, allowed_books: set[str] | None = None) -> list[RetrievalHit]:
-        return self.retriever.search(query=query, top_k=top_k, allowed_books=allowed_books)
+        return self.chunk_search.search(query=query, top_k=top_k, allowed_books=allowed_books)
 
     @staticmethod
     def _normalize_space(text: str) -> str:

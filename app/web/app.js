@@ -31,6 +31,33 @@ function pickFocusEnd(item) {
 const uiState = {
   lastUploadedBook: '',
 };
+const SESSION_BOOKS_KEY = 'smart_book_window_books';
+
+function getSessionBooks() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_BOOKS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cleaned = parsed
+      .map((x) => String(x || '').trim())
+      .filter((x) => Boolean(x));
+    return Array.from(new Set(cleaned));
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveSessionBooks(books) {
+  const normalized = Array.from(new Set((books || []).map((x) => String(x || '').trim()).filter((x) => Boolean(x))));
+  sessionStorage.setItem(SESSION_BOOKS_KEY, JSON.stringify(normalized));
+}
+
+function addSessionBook(book) {
+  const name = String(book || '').trim();
+  if (!name) return;
+  saveSessionBooks([name]);
+}
 
 function setLastUploadedBook(book) {
   uiState.lastUploadedBook = book || '';
@@ -102,6 +129,7 @@ async function loadPreloadedBook() {
     : `Ошибка: ${data.detail ?? 'unknown'}`;
   if (res.ok && data.book) {
     setLastUploadedBook(data.book);
+    addSessionBook(data.book);
   }
 }
 
@@ -121,6 +149,7 @@ async function uploadBook() {
   out.textContent = res.ok ? `OK: ${data.book}, chunks=${data.chunks_added}` : `Ошибка: ${data.detail ?? 'unknown'}`;
   if (res.ok && data.book) {
     setLastUploadedBook(data.book);
+    addSessionBook(data.book);
   }
 }
 
@@ -128,6 +157,7 @@ const searchState = {
   query: '',
   page: 1,
   pageSize: 5,
+  books: [],
 };
 
 function renderSearchSnippets(data) {
@@ -182,6 +212,7 @@ async function fetchSearchPage(page) {
       page,
       page_size: searchState.pageSize,
       quote_size: getQuoteSize(),
+      books: searchState.books,
     }),
   });
   const data = await res.json();
@@ -200,8 +231,14 @@ async function searchSnippets() {
     out.textContent = 'Введите запрос';
     return;
   }
+  const books = getSessionBooks();
+  if (!books.length) {
+    out.textContent = 'Сначала загрузите книгу в этом окне. Поиск работает только по последней загруженной книге.';
+    return;
+  }
   searchState.query = query;
   searchState.page = 1;
+  searchState.books = books;
   await fetchSearchPage(1);
 }
 
@@ -212,12 +249,17 @@ async function askQuestion() {
     out.textContent = 'Введите вопрос';
     return;
   }
+  const books = getSessionBooks();
+  if (!books.length) {
+    out.textContent = 'Сначала загрузите книгу в этом окне. Ответы строятся только по последней загруженной книге.';
+    return;
+  }
 
   out.textContent = 'Обработка...';
   const res = await fetch('/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, top_k: 5, quote_size: getQuoteSize() }),
+    body: JSON.stringify({ question, top_k: 5, quote_size: getQuoteSize(), books }),
   });
   const data = await res.json();
   if (!res.ok) {

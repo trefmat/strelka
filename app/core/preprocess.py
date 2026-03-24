@@ -19,7 +19,11 @@ _RU_STOPWORDS = {
                                                                       
     "слово", "слова", "слов", "текст", "текста",
                                                              
-    "найди", "найдите", "где", "говорится", "рассказывается", "упоминается", "описывается",
+    "найди", "найдите", "где",
+    "говорится", "говорилось",
+    "рассказывается", "рассказывалось", "расказывалось",
+    "упоминается", "упоминалось",
+    "описывается", "описывалось",
     "сказано", "написано", "известно", "расскажи", "покажи",
                                                                  
     "кто", "кого", "кому", "кем", "ком", "чей", "чья", "чье", "чьи",
@@ -47,7 +51,13 @@ _MORPH_TOKEN_PREFIX = "m_"
 _VOWELS = set("аеёиоуыэюя")
 _QUERY_PREFIX_RE = re.compile(
     r"^\s*(?:"
-    r"где\s+(?:говорится|рассказывается|упоминается|описывается)\s+(?:о|об|про)\s+|"
+    r"где\s+(?:"
+    r"говорится|говорилось|"
+    r"рассказывается|рассказывалось|расказывалось|"
+    r"упоминается|упоминалось|"
+    r"описывается|описывалось|"
+    r"сказано|написано|известно"
+    r")\s+(?:о|об|про)\s+|"
     r"(?:расскажи|покажи|найди|найдите)\s+(?:о|об|про)?\s*|"
     r"что\s+(?:сказано|написано|известно)\s+(?:о|об|про)\s+|"
     r"(?:есть|найдется|найдётся)\s+ли\s+(?:в\s+тексте\s+)?(?:о|об|про)\s+"
@@ -57,6 +67,9 @@ _QUERY_PREFIX_RE = re.compile(
 
 _SPEECH_TERMS = {
     "говорил", "говорит", "сказал", "сказала", "сказали",
+    "говорилось",
+    "рассказывалось", "расказывалось",
+    "упоминалось", "описывалось",
     "спросил", "спросила", "ответил", "ответила", "отвечал", "отвечала",
     "пишет", "писал", "писала", "написал", "написала", "произнес", "произнесла",
     "воскликнул", "воскликнула",
@@ -119,9 +132,15 @@ class TextPreprocessor:
     def is_morph_token(token: str) -> bool:
         return token.startswith(_MORPH_TOKEN_PREFIX)
 
+    @staticmethod
+    def _normalize_search_text(text: str) -> str:
+        normalized = text.lower().replace("ё", "е")
+        return normalized.replace("[", "").replace("]", "")
+
     def tokenize(self, text: str, *, include_synonyms: bool = True) -> list[str]:
         tokens = []
-        for raw in _TOKEN_RE.findall(text.lower().replace("ё", "е")):
+        normalized = self._normalize_search_text(text)
+        for raw in _TOKEN_RE.findall(normalized):
             if raw in _RU_STOPWORDS:
                 continue
             stem = self._stem(raw)
@@ -147,7 +166,8 @@ class TextPreprocessor:
 
     def tokenize_exact(self, text: str) -> list[str]:
         tokens = []
-        for raw in _TOKEN_RE.findall(text.lower().replace("ё", "е")):
+        normalized = self._normalize_search_text(text)
+        for raw in _TOKEN_RE.findall(normalized):
             if raw in _RU_STOPWORDS or len(raw) < 2:
                 continue
             tokens.append(raw)
