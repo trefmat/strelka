@@ -8,38 +8,91 @@
 </head>
 <body>
   <main class="container">
-    <h1>Умный поиск по книгам</h1>
-    <p class="subtitle">Локальный тестовый стенд: загрузка .txt/.fb2/.epub, поиск фрагментов и ответы по цитатам.</p>
-
-    <section class="card">
-      <h2>1) Загрузка книги</h2>
-      <input id="bookFile" type="file" accept=".txt,.fb2,.epub" />
-      <button id="uploadBtn">Загрузить</button>
-      <div class="inline-controls">
-        <select id="preloadedBook">
-          <option value="">Выберите предзагруженную книгу</option>
-        </select>
-        <button id="loadPreloadedBtn" class="btn-compact">Выбрать из предзагруженных</button>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Smart Book Search</p>
+        <h1>Умный поиск по книгам</h1>
+        <p class="subtitle">Загружайте тексты, находите точные фрагменты и задавайте вопросы с ответами по цитатам.</p>
       </div>
-      <button id="readBookBtn" class="hidden">Читать книгу</button>
-      <div id="uploadResult" class="result"></div>
+      <div class="hero-panel" aria-label="Возможности сервиса">
+        <span>.txt</span>
+        <span>.fb2</span>
+        <span>.epub</span>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <article class="card upload-card">
+        <div class="section-heading">
+          <span class="step">01</span>
+          <div>
+            <h2>Загрузка книги</h2>
+            <p class="hint">Файл остается в локальном индексе сервиса.</p>
+          </div>
+        </div>
+        <label class="file-drop" for="bookFile">
+          <span class="file-drop-title">Выберите файл книги</span>
+          <span class="file-drop-subtitle">TXT, FB2 или EPUB до 100 MB</span>
+          <input id="bookFile" type="file" accept=".txt,.fb2,.epub" />
+        </label>
+        <div class="actions-row">
+          <button id="uploadBtn">Загрузить</button>
+          <button id="readBookBtn" class="secondary hidden">Читать книгу</button>
+        </div>
+        <div class="inline-controls">
+          <select id="preloadedBook">
+            <option value="">Выберите предзагруженную книгу</option>
+          </select>
+          <button id="loadPreloadedBtn" class="secondary">Добавить</button>
+        </div>
+        <div id="uploadResult" class="result" aria-live="polite"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-heading">
+          <span class="step">02</span>
+          <div>
+            <h2>Поиск фрагментов</h2>
+            <p class="hint">Подходит для точных сцен, имен и событий.</p>
+          </div>
+        </div>
+        <label for="quoteSize">Размер фрагмента</label>
+        <div class="control-line">
+          <input id="quoteSize" type="number" min="120" max="2400" step="20" value="420" />
+          <span class="unit">символов</span>
+        </div>
+        <input id="searchQuery" placeholder="Например: где говорится про собаку" />
+        <button id="searchBtn">Найти фрагменты</button>
+        <div id="searchResult" class="result" aria-live="polite"></div>
+      </article>
+
+      <article class="card ask-card">
+        <div class="section-heading">
+          <span class="step">03</span>
+          <div>
+            <h2>Вопрос по книгам</h2>
+            <p class="hint">Лучше уточнять персонажа, действие и сцену.</p>
+          </div>
+        </div>
+        <input id="askQuery" placeholder="Например: почему герой принял это решение в этой сцене?" />
+        <button id="askBtn">Спросить</button>
+        <div id="askResult" class="result" aria-live="polite"></div>
+      </article>
     </section>
 
-    <section class="card">
-      <h2>2) Поиск фрагментов</h2>
-      <label for="quoteSize">Размер выводимого фрагмента (символов):</label>
-      <input id="quoteSize" type="number" min="120" max="2400" step="20" value="420" />
-      <input id="searchQuery" placeholder="Например: где говорится про собаку" />
-      <button id="searchBtn">Найти</button>
-      <div id="searchResult" class="result"></div>
-    </section>
-
-    <section class="card">
-      <h2>3) Вопрос по книгам</h2>
-      <p class="hint">Лучше уточнять персонажа, действие и сцену: «Почему Пьер отказался ехать?»</p>
-      <input id="askQuery" placeholder="Например: почему герой принял это решение в этой сцене?" />
-      <button id="askBtn">Спросить</button>
-      <div id="askResult" class="result"></div>
+    <section class="info-strip" aria-label="Принципы работы">
+      <div>
+        <strong>Поиск</strong>
+        <span>Ранжирование по релевантности и совпадениям.</span>
+      </div>
+      <div>
+        <strong>Ответы</strong>
+        <span>Формируются только из найденных цитат.</span>
+      </div>
+      <div>
+        <strong>Источники</strong>
+        <span>Каждый ответ сохраняет переход к книге.</span>
+      </div>
     </section>
   </main>
 

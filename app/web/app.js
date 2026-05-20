@@ -28,6 +28,22 @@ function pickFocusEnd(item) {
   return item.focus_end ?? item.offset_end ?? pickFocusStart(item);
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatQuote(value) {
+  const safe = escapeHtml(value);
+  return safe
+    .replace(/\[\[/g, '<mark class="quote-hit">')
+    .replace(/\]\]/g, '</mark>');
+}
+
 const uiState = {
   lastUploadedBook: '',
 };
@@ -169,12 +185,14 @@ function renderSearchSnippets(data) {
 
   const quotes = data.snippets.map((s, i) => {
     const rank = s.rank ?? ((data.page - 1) * data.page_size + i + 1);
+    const book = escapeHtml(s.book);
+    const quote = formatQuote(s.quote);
     return `
       <div class="quote">
-        <b>${rank}. ${s.book}</b> [${s.offset_start}-${s.offset_end}] score=${s.score}<br/>
-        ${s.quote}
+        <b>${rank}. ${book}</b> <span class="quote-meta">[${s.offset_start}-${s.offset_end}] score=${s.score}</span><br/>
+        ${quote}
         <div class="quote-actions">
-          <button class="btn-compact openBookBtn" data-book="${s.book}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
+          <button class="btn-compact openBookBtn" data-book="${book}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
         </div>
       </div>
     `;
@@ -269,24 +287,24 @@ async function askQuestion() {
   const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
   if (data.message === 'clarify_needed') {
     const tips = suggestions.length
-      ? `<br/><br/><b>Попробуйте уточнить так:</b><ul class="suggestions">${suggestions.map((q) => `<li>${q}</li>`).join('')}</ul>`
+      ? `<br/><br/><b>Попробуйте уточнить так:</b><ul class="suggestions">${suggestions.map((q) => `<li>${escapeHtml(q)}</li>`).join('')}</ul>`
       : '';
-    out.innerHTML = `<b>Ответ:</b> ${data.answer}${tips}`;
+    out.innerHTML = `<b>Ответ:</b> ${escapeHtml(data.answer)}${tips}`;
     return;
   }
   const sources = (data.sources || []).map((s, i) => `
     <div class="quote">
-      <b>${i + 1}. ${s.book}</b> [${s.offset_start}-${s.offset_end}] score=${s.score}<br/>
-      ${s.quote}
+      <b>${i + 1}. ${escapeHtml(s.book)}</b> <span class="quote-meta">[${s.offset_start}-${s.offset_end}] score=${s.score}</span><br/>
+      ${formatQuote(s.quote)}
       <div class="quote-actions">
-        <button class="btn-compact openBookBtn" data-book="${s.book}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
+        <button class="btn-compact openBookBtn" data-book="${escapeHtml(s.book)}" data-start="${pickFocusStart(s)}" data-end="${pickFocusEnd(s)}">Открыть в книге</button>
       </div>
     </div>
   `).join('');
   const tips = suggestions.length
-    ? `<br/><br/><b>Как переформулировать вопрос:</b><ul class="suggestions">${suggestions.map((q) => `<li>${q}</li>`).join('')}</ul>`
+    ? `<br/><br/><b>Как переформулировать вопрос:</b><ul class="suggestions">${suggestions.map((q) => `<li>${escapeHtml(q)}</li>`).join('')}</ul>`
     : '';
-  out.innerHTML = `<b>Ответ:</b> ${data.answer}<br/><br/><b>Источники:</b>${sources || '<br/>нет'}${tips}`;
+  out.innerHTML = `<b>Ответ:</b> ${escapeHtml(data.answer)}<br/><br/><b>Источники:</b>${sources || '<br/>нет'}${tips}`;
   bindOpenButtons(out);
 }
 

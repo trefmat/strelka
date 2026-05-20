@@ -8,12 +8,17 @@
 </head>
 <body>
   <main class="container reader-container">
-    <section class="card">
-      <h1 id="readerTitle">Читалка</h1>
-      <p id="readerMeta" class="subtitle">Загрузка...</p>
-      <div class="reader-toolbar">
-        <button id="readerBackBtn" class="btn-compact" type="button">Назад</button>
-        <button id="readerTopBtn" class="btn-compact" type="button">В начало</button>
+    <section class="card reader-card">
+      <div class="reader-header">
+        <div>
+          <p class="eyebrow">Reader</p>
+          <h1 id="readerTitle">Читалка</h1>
+          <p id="readerMeta" class="subtitle">Загрузка...</p>
+        </div>
+        <div class="reader-toolbar">
+          <button id="readerBackBtn" class="secondary" type="button">Назад</button>
+          <button id="readerTopBtn" class="secondary" type="button">В начало</button>
+        </div>
       </div>
       <pre id="readerText" class="reader-text">Обработка...</pre>
     </section>
